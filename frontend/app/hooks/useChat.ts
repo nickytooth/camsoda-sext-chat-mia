@@ -24,6 +24,7 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
   const mode = "sexting" as const;
   const [isConnected, setIsConnected] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
+  const [isCardDelivering, setIsCardDelivering] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
   // Delay before her typing bubble appears after a send, so it doesn't pop in
@@ -130,9 +131,15 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
         case "opening_end":
           setIsOpening(false);
           break;
+        case "card_start":
+          setIsCardDelivering(true);
+          break;
+        case "card_end":
+          setIsCardDelivering(false);
+          break;
         case "typing_start":
           if (typingTimer.current) clearTimeout(typingTimer.current);
-          typingTimer.current = setTimeout(() => setIsTyping(true), 1000);
+          setIsTyping(true);
           break;
         case "typing_end":
           if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
@@ -285,6 +292,7 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
     isTyping,
     isConnected,
     isOpening,
+    isCardDelivering,
     mode,
     sendMessage,
     suggestReply,

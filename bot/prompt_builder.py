@@ -138,7 +138,12 @@ async def build_prompt(
                 "genuinely belong to what you two are talking about.\n"
                 "- Don't re-tell a story or fantasy you've already shared with him. If one "
                 "comes back up, reference it as a callback instead ('like I told you about...'), "
-                "never repeat it as if it's new."
+                "never repeat it as if it's new.\n"
+                "- VARIETY — no loops: never repeat the same act, scene, position, or phrase "
+                "across turns. Build tension before graphic content. Respond to what he "
+                "SPECIFICALLY says instead of running a template. If you described a specific "
+                "image last time (e.g. 'bent over the desk'), find a completely different one "
+                "this time — different act, different mood, different tempo."
             )
 
     # Time since you last spoke — lets her greet like a real person

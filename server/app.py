@@ -327,8 +327,11 @@ async def _send_response_with_typing(
         return
 
     for i, msg in enumerate(response.messages):
-        # Typing indicator
-        await manager.send_json(user_id, {"type": "typing_start"})
+        # typing_start is sent at the start of the first iteration, or was
+        # already sent at the end of the previous iteration (immediately after
+        # the last message) so the typing indicator appears with no dead gap.
+        if i == 0:
+            await manager.send_json(user_id, {"type": "typing_start"})
 
         if fixed_delay is not None:
             delay = fixed_delay
@@ -354,10 +357,13 @@ async def _send_response_with_typing(
             "mode": mode,
         })
 
-        # Pause between multi-bubble messages
+        # Immediately start typing for the next bubble — no dead gap where the
+        # user sees no activity. The optional bubble_gap sleeps WHILE typing is
+        # already showing, so it just extends the typing time slightly.
         if i < len(response.messages) - 1:
-            gap = bubble_gap if bubble_gap is not None else random.uniform(0.3, 0.7)
-            await asyncio.sleep(gap)
+            await manager.send_json(user_id, {"type": "typing_start"})
+            if bubble_gap is not None and bubble_gap > 0:
+                await asyncio.sleep(bubble_gap)
 
 
 
@@ -422,14 +428,17 @@ async def websocket_chat(ws: WebSocket, user_id: int = Query(default=None), user
                 if text:
                     from bot.memory.stm import add_message as stm_add
                     await stm_add(user_id, "user", text, mode="sexting")
+                await manager.send_json(user_id, {"type": "card_start"})
                 await manager.send_json(user_id, {"type": "typing_start"})
                 response = await engine.generate_card(user_id, kind)
-                # Stories and fantasies: steady ~1s beat — ~1s before the first
-                # bubble and ~1s between each of the (always 3) bubbles.
+                # Stories and fantasies: slow delivery — 2-3s typing before each
+                # bubble and 2-3s between bubbles, so it reads like she's typing
+                # each part fresh (not dumping a wall of text).
                 await _send_response_with_typing(
                     user_id, response, mode="sexting",
-                    fixed_delay=1.0, bubble_gap=0.0,
+                    fixed_delay=2.5, bubble_gap=0.0,
                 )
+                await manager.send_json(user_id, {"type": "card_end"})
                 _schedule_idle_nudge(user_id)
                 continue
 
