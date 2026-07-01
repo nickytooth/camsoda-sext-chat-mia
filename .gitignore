@@ -1,0 +1,21 @@
+.env
+env
+data/
+.claude/
+_*.py
+*.session
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+content_index.json
+check_*.py
+
+# Frontend (Next.js)
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.vercel
+frontend/.env*.local
