@@ -102,6 +102,7 @@ function ChatView({ userName, userId, onReset }: { userName: string; userId: num
     messages,
     isTyping,
     isConnected,
+    isOpening,
     mode,
     sendMessage,
     suggestReply,
@@ -137,7 +138,7 @@ function ChatView({ userName, userId, onReset }: { userName: string; userId: num
     }
   }, [messages, isTyping]);
 
-  const inputDisabled = false;
+  const inputDisabled = isOpening;
 
   // Sexting messages only (the backend persists per mode; this build is sexting-only).
   const visibleMessages = messages.filter((msg) => msg.mode === mode);

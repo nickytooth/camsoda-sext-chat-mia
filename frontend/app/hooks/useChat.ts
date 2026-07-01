@@ -23,6 +23,7 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
   const [isTyping, setIsTyping] = useState(false);
   const mode = "sexting" as const;
   const [isConnected, setIsConnected] = useState(false);
+  const [isOpening, setIsOpening] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
   // Delay before her typing bubble appears after a send, so it doesn't pop in
@@ -78,6 +79,7 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
         }
         openingAnimating.current = true;
         sextingOpeningPlayed.current = true;
+        setIsOpening(true);
         try {
           setMessages([]);
           for (let i = 0; i < loaded.length; i++) {
@@ -93,6 +95,7 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
           }
         } finally {
           openingAnimating.current = false;
+          setIsOpening(false);
         }
         return;
       }
@@ -119,6 +122,14 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
       const data = JSON.parse(event.data);
 
       switch (data.type) {
+        case "opening_start":
+          // Backend is delivering the one-time opening over the socket — lock
+          // the input for its whole duration (input is gated on isOpening).
+          setIsOpening(true);
+          break;
+        case "opening_end":
+          setIsOpening(false);
+          break;
         case "typing_start":
           if (typingTimer.current) clearTimeout(typingTimer.current);
           typingTimer.current = setTimeout(() => setIsTyping(true), 1000);
@@ -273,6 +284,7 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
     messages,
     isTyping,
     isConnected,
+    isOpening,
     mode,
     sendMessage,
     suggestReply,

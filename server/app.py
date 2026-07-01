@@ -106,19 +106,32 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
 
 async def _generate_dynamic_opening(engine: ChatEngine) -> str:
-    """Ask the LLM to write Victoria's opening message — fresh every time."""
+    """Ask the LLM to write Victoria's opening message — fresh every time.
+
+    Includes the same time-of-day / location context that build_prompt injects
+    into every reply, so the opening is consistent with where she'll say she is
+    once he answers. Without it the bare persona defaults to a generic "empty
+    house tonight" vibe that then contradicts the first time-aware reply (e.g.
+    opens with "the house is empty" at 2pm, then says "I'm at my office" next turn).
+    """
+    from bot.time_context import get_time_prompt
     persona_prompt = engine.persona.to_system_prompt()
+    time_prompt = await get_time_prompt()
     messages = [
         {
             "role": "system",
             "content": (
                 f"{persona_prompt}\n\n"
+                f"{time_prompt}\n\n"
                 "You are starting a conversation with him for the first time. "
                 "Write your opening message — the thing you finally worked up "
-                "the nerve to say after wanting to for weeks. 2-3 short texts "
-                "maximum, each on its own line. No period at the end. Be natural, "
-                "be real, be yourself. Do NOT use the same phrasing as your "
-                "opening_lines — say something fresh."
+                "the nerve to say after wanting to for weeks. Ground it in where "
+                "you actually are and the time of day RIGHT NOW (above) — never "
+                "reference a different place or time (don't say 'tonight' by day, "
+                "or 'are you asleep' in the afternoon). 2-3 short texts maximum, "
+                "each on its own line. No period at the end. Be natural, be real, "
+                "be yourself. Do NOT use the same phrasing as your opening_lines — "
+                "say something fresh."
             ),
         },
         {"role": "user", "content": "(he hasn't said anything yet — you're texting first)"},
@@ -187,6 +200,7 @@ async def reset_user(user_id: int = Query(default=None)):
     # the fresh conversation (the "no reply after reset" bug).
     _cancel_idle(uid)
     nudge_counts.pop(uid, None)
+    _openings_started.discard(uid)
     if engine:
         engine.clear_user_state(uid)
     from bot.memory.ltm import clear_retrieval_state
@@ -234,6 +248,10 @@ MAX_CONSECUTIVE_NUDGES = 1      # at most one nudge, then stay quiet until he wr
 
 idle_tasks: dict[int, asyncio.Task] = {}
 nudge_counts: dict[int, int] = {}
+# Users whose one-time opening has already been started this process. Guards
+# against concurrent reconnects (reload / StrictMode double-mount) regenerating
+# the opening before the first assistant row is persisted.
+_openings_started: set[int] = set()
 
 
 def _cancel_idle(user_id: int):
@@ -353,25 +371,36 @@ async def websocket_chat(ws: WebSocket, user_id: int = Query(default=None), user
         from bot.memory.facts import upsert_fact
         await upsert_fact(user_id, "name", user_name)
 
-    # New user — Victoria initiates with a dynamically generated opening.
-    # Sent through WS with typing indicator so the user sees activity while
-    # the LLM generates, instead of a blank screen blocking on /api/history.
-    from bot.memory.stm import count_turns
-    turns = await count_turns(user_id, mode="sexting")
-    if turns == 0 and engine:
-        await manager.send_json(user_id, {"type": "typing_start"})
-        try:
-            opening = await _generate_dynamic_opening(engine)
-        except Exception:
-            logger.warning("Dynamic opening failed, falling back to static", exc_info=True)
-            opening = engine.persona.get_random_opening()
-        parts = [p.strip() for p in opening.split("\n") if p.strip()]
-        from bot.memory.stm import add_message as stm_add
-        for part in parts:
-            await stm_add(user_id, "assistant", part, mode="sexting")
-        response = ChatResponse(messages=parts)
-        await _send_response_with_typing(user_id, response, mode="sexting")
-        _schedule_idle_nudge(user_id)
+    # New user — Victoria initiates with a dynamically generated opening, ONCE.
+    # Guard on BOTH existing history (persists across restarts) and an in-memory
+    # in-progress set (covers concurrent reconnects / StrictMode double-mount),
+    # so a reload/reconnect never regenerates a fresh opening. The old guard used
+    # count_turns() — which counts only USER messages — so it stayed 0 until the
+    # user replied and re-fired an opening on every reconnect.
+    if engine and user_id not in _openings_started:
+        existing = await get_all_messages(user_id, mode="sexting")
+        if not existing:
+            _openings_started.add(user_id)
+            # Tell the client an opening is in progress so it can lock the input
+            # for its whole duration (generation + streamed bubbles). opening_end
+            # is in a finally so the input can never get stuck disabled.
+            await manager.send_json(user_id, {"type": "opening_start"})
+            try:
+                await manager.send_json(user_id, {"type": "typing_start"})
+                try:
+                    opening = await _generate_dynamic_opening(engine)
+                except Exception:
+                    logger.warning("Dynamic opening failed, falling back to static", exc_info=True)
+                    opening = engine.persona.get_random_opening()
+                parts = [p.strip() for p in opening.split("\n") if p.strip()]
+                from bot.memory.stm import add_message as stm_add
+                for part in parts:
+                    await stm_add(user_id, "assistant", part, mode="sexting")
+                response = ChatResponse(messages=parts)
+                await _send_response_with_typing(user_id, response, mode="sexting")
+            finally:
+                await manager.send_json(user_id, {"type": "opening_end"})
+            _schedule_idle_nudge(user_id)
 
     try:
         while True:
