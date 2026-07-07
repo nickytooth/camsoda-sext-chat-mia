@@ -60,7 +60,7 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
           : undefined,
       }));
 
-      // Fresh opening: Victoria initiated and the user hasn't replied yet
+      // Fresh opening: Mia initiated and the user hasn't replied yet
       // (every loaded message is from her). Play it out with the typing
       // indicator and send the bubbles one by one, instead of dumping them.
       const isFreshOpening =

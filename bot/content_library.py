@@ -1,7 +1,7 @@
 """
 Authored fantasy/story libraries + per-user "already shared" tracking.
 
-The libraries (library/*.yaml) are the same for everyone. Which items Victoria
+The libraries (library/*.yaml) are the same for everyone. Which items Mia
 has already told a given user is tracked in Postgres (shared_content), so the
 "Hear a fantasy" / "Hear a story" cards never repeat until the pool is exhausted.
 """

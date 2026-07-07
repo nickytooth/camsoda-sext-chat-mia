@@ -32,24 +32,23 @@ const STARTER_MESSAGES: Record<string, string[]> = {
 };
 
 const PROFILE = {
-  name: "Victoria Donovan",
+  name: "Mia",
   tagline:
-    "Your girlfriend's stepmother — elegant, married, and quietly horny. She knows it's wrong. That's the best part.",
+    "Your best friend's girlfriend — zero filter, zero shame, and zero intention of stopping.",
   bio:
-    "Texas-born, Miami-made. By day she closes eight-figure waterfront deals; by night she pours a glass of red in a house that's gone quiet. Twenty years married to a man who stopped seeing her — and she's done pretending she doesn't want more. That what she wants is so forbidden? That's exactly the thrill.",
+    "Miami party girl, 26, dating Tyler (your best friend). She's been wanting you since his birthday party and doesn't feel a shred of guilt about it. She thinks cheating is hot, sends nudes unprompted, and says exactly what she wants in the most vulgar way possible. That she's not supposed to want you? That's exactly the thrill.",
   profile: {
-    age: "42",
-    body: "Athletic",
+    age: "26",
+    body: "Curvy",
     ethnicity: "European",
     language: "English",
-    relationship: "Married",
-    occupation: "Luxury real estate agent",
-    hobbies: "Wine tasting, yoga, interior design",
-    personality: "Refined, seductive, emotionally complex",
+    relationship: "Taken (Tyler's girl)",
+    occupation: "Bartender / party girl",
+    hobbies: "Clubbing, gym, brunch, TikTok",
+    personality: "Shameless, bratty, extremely crude",
   },
 };
 
-/** Generate a stable numeric user ID from a name string */
 function nameToId(name: string): number {
   let hash = 0;
   for (let i = 0; i < name.length; i++) {
@@ -65,7 +64,7 @@ export default function Home() {
 
   // Load saved user from localStorage
   useEffect(() => {
-    const saved = localStorage.getItem("victoria_user");
+    const saved = localStorage.getItem("mia_user");
     if (saved) {
       const { name, id } = JSON.parse(saved);
       setUserName(name);
@@ -78,7 +77,7 @@ export default function Home() {
     const id = nameToId(name);
     setUserName(name);
     setUserId(id);
-    localStorage.setItem("victoria_user", JSON.stringify({ name, id }));
+    localStorage.setItem("mia_user", JSON.stringify({ name, id }));
   };
 
   const handleReset = async () => {
@@ -86,7 +85,7 @@ export default function Home() {
     try {
       await fetch(`${API_BASE}/api/reset?user_id=${userId}`, { method: "POST" });
     } catch (e) {}
-    localStorage.removeItem("victoria_user");
+    localStorage.removeItem("mia_user");
     setUserName(null);
     setUserId(1);
   };
@@ -160,11 +159,11 @@ function ChatView({ userName, userId, onReset }: { userName: string; userId: num
         <div className="flex items-center justify-between px-4 py-3 bg-[#111118] border-b border-[var(--border)]">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-600 to-pink-500 flex items-center justify-center text-sm font-bold text-white">
-              V
+              M
             </div>
             <div>
               <span className="text-[15px] font-semibold text-white">
-                Victoria
+                Mia
               </span>
               <div className="flex items-center gap-1.5 mt-0.5">
                 <Circle

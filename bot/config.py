@@ -10,10 +10,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # PostgreSQL connection string. Railway injects DATABASE_URL automatically when a
 # Postgres service is attached; locally it defaults to a dev container.
 DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/victoria"
+    "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/mia"
 )
-# Victoria is a single, always-open persona for all sexting.
-PERSONA_FILE_SEXTING = BASE_DIR / os.getenv("SINGLE_PERSONA_FILE", "personas/victoria2.yaml")
+# Mia is a single, always-open persona for all sexting.
+PERSONA_FILE_SEXTING = BASE_DIR / os.getenv("SINGLE_PERSONA_FILE", "personas/mia.yaml")
 
 # Authored libraries the "Hear a fantasy" / "Hear a story" cards draw from
 # (same for everyone, tracked-as-shared per user in the DB). In library/ so they

@@ -26,13 +26,13 @@ Railway → **New → Database → PostgreSQL**. It exposes `DATABASE_URL` autom
   - `OPENWEATHER_API_KEY` (optional)
   - optional tuning: `SEXTING_DEBOUNCE_SECONDS`, `DEFAULT_USER_ID`
   - `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` are **not required** (Anthropic is not used at runtime)
-- Generate a public domain (Settings → Networking). Note it, e.g. `https://victoria-backend.up.railway.app`.
+- Generate a public domain (Settings → Networking). Note it, e.g. `https://mia-backend.up.railway.app`.
 - Tables are created automatically on first boot (`init_db`).
 
 ## 3. Frontend service
 - **New → same repo**. **Root directory: `frontend`**.
 - Build: `npm install && npm run build` — Start: `npm run start` (Next honors Railway's `$PORT`).
-- **Variable:** `NEXT_PUBLIC_API_URL = https://victoria-backend.up.railway.app` (the backend's public URL, **no trailing slash**).
+- **Variable:** `NEXT_PUBLIC_API_URL = https://mia-backend.up.railway.app` (the backend's public URL, **no trailing slash**).
   - ⚠️ This is baked in at **build time**. Set it **before** the build; if you change it, **redeploy** the frontend.
   - The WebSocket URL is derived automatically (`https` → `wss`).
 - Generate a public domain and open it.
@@ -54,11 +54,11 @@ The app is Postgres-only now. Run a local Postgres, then start both apps:
 
 ```bash
 # 1. Postgres (Docker)
-docker run -d --name victoria-pg \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=victoria \
+docker run -d --name mia-pg \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=mia \
   -p 5432:5432 postgres:16
 
-# 2. Backend (uses the default DATABASE_URL = localhost:5432/victoria)
+# 2. Backend (uses the default DATABASE_URL = localhost:5432/mia)
 uvicorn server.app:app --host 127.0.0.1 --port 8000 --app-dir .
 
 # 3. Frontend (NEXT_PUBLIC_API_URL defaults to http://localhost:8000)

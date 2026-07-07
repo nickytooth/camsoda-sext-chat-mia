@@ -8,7 +8,7 @@ const geistSans = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "Victoria — Private Chat",
+  title: "Mia — Private Chat",
   description: "AI Girlfriend Chat Demo",
 };
 

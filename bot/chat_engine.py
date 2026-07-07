@@ -220,11 +220,11 @@ class ChatEngine:
     # (Grok) and the fallback (Gemini) return nothing/refuse. They keep the
     # conversation alive instead of leaving the user staring at silence.
     _GRACEFUL_DEFLECTIONS = [
-        "Mmm, you scattered my thoughts for a second there... say that again for me?",
-        "You've got me a little distracted right now... tell me again, slowly?",
-        "Hold that thought — my mind just wandered somewhere warm. What were you saying?",
-        "Mmm, I lost my train of thought looking at you... come back to that for me?",
-        "Say that to me again — I want to give it my full attention this time.",
+        "fuck my brain just short-circuited... say that again?",
+        "wait i got distracted thinking about your cock... what were you saying?",
+        "hold on, i'm still recovering from that... tell me again?",
+        "god you make me stupid sometimes... come back to that for me?",
+        "say that again babe, i was too busy imagining what you'd do to me",
     ]
 
     @staticmethod
@@ -277,7 +277,7 @@ class ChatEngine:
     async def suggest_reply(self, user_id: int, mode: str = "sexting") -> str:
         """
         AI Help: write a suggested NEXT message for the USER to send — a reply
-        TO Victoria, in his voice. Used by the 'generate reply' button. The
+        TO Mia, in his voice. Used by the 'generate reply' button. The
         suggestion is not stored; the user approves/edits it before sending.
         """
         stm = await get_recent_messages(user_id, STM_MAX_TURNS, mode=mode)
@@ -292,17 +292,17 @@ class ChatEngine:
             if m["role"] == "user":
                 transcript_lines.append(f"{him}: {m['content']}")
             elif m["role"] == "assistant":
-                transcript_lines.append(f"Victoria: {m['content']}")
+                transcript_lines.append(f"Mia: {m['content']}")
         transcript = "\n".join(transcript_lines[-20:])
 
         system = (
             f"You are a flirting wingman helping a young man ({him}) who is sexting "
-            "with Victoria — an older, elegant, seductive woman who is his girlfriend's "
-            "mother. It is a consensual adult fantasy roleplay.\n\n"
+            "with Mia — his best friend's girlfriend. She's a shameless, crude, 26-year-old "
+            "party girl who loves cheating and has zero filter. It is a consensual adult fantasy roleplay.\n\n"
             "Write the SINGLE next message HE should send to her. Rules:\n"
-            "- First person, written TO Victoria, in his voice\n"
+            "- First person, written TO Mia, in his voice\n"
             "- Short and natural, like a real text — one or two lines, no period at the end\n"
-            "- Confident, warm, playful; match her tone and gently escalate the flirtation\n"
+            "- Confident, direct, a little dirty; match her energy and escalate the heat\n"
             "- React to what she JUST said — don't ignore it\n"
             "- No quotation marks, no name labels, no emojis — output only the message text\n\n"
             "Conversation so far:\n" + transcript
@@ -348,9 +348,9 @@ class ChatEngine:
 
         hint = (
             "He's gone quiet for a few minutes. Double-text him ONCE, the way a real "
-            "woman does when someone's still on her mind — pick up a SPECIFIC thread "
-            "from what you two were just saying, or share a vivid little thought or image "
-            "that just crossed your mind. Make it feel spontaneous and a touch seductive, "
+            "shameless girl does when someone's still on her mind — pick up a SPECIFIC thread "
+            "from what you two were just saying, or send him a filthy little thought or a nude "
+            "description that just crossed your mind. Make it feel spontaneous and desperate, "
             "never needy. ONE short line only. Do NOT ask generic filler ('what are you "
             "thinking', 'are you there', 'still there?'), do NOT recap, and do NOT complain "
             "about waiting or being ignored."
@@ -390,7 +390,7 @@ class ChatEngine:
         return ChatResponse(messages=parts)
 
     async def _deliver_dynamic_fantasy(self, user_id: int) -> ChatResponse:
-        """Generate a fresh fantasy rooted in Victoria's current location and
+        """Generate a fresh fantasy rooted in Mia's current location and
         tailored to the user from his facts + LTM + recent chat.
 
         The authored fantasies in library/fantasies.yaml are used only as STYLE
@@ -444,7 +444,7 @@ class ChatEngine:
             "STYLE: match the examples below EXACTLY in length, rhythm and tone — do NOT reuse "
             "their content or setting, only their style:\n"
             f"{example_block}\n"
-            "FORMAT: about three short, charged bubbles, explicit but elegant, in your texting "
+            "FORMAT: about three short, filthy bubbles, explicit and raw, in your texting "
             "voice, no trailing period on the last line."
             f"{avoid_block}"
         )
@@ -491,7 +491,7 @@ class ChatEngine:
     async def generate_card(self, user_id: int, kind: str) -> ChatResponse:
         """Card-triggered fantasy/story.
 
-        - 'fantasy': ALWAYS generated fresh, rooted in Victoria's current location
+        - 'fantasy': ALWAYS generated fresh, rooted in Mia's current location
           and tailored to the user from his facts + LTM + recent chat (the authored
           library serves only as a style exemplar). See `_deliver_dynamic_fantasy`.
         - 'story': pulled verbatim from the authored library (so she never repeats),
@@ -538,9 +538,9 @@ class ChatEngine:
         logger.warning("Card story library empty/missing — improvising for user %d", user_id)
         hint = (
             "He asked for a story and you've already told him your best ones. Either "
-            "invent a fresh vivid memory from your past, or warmly call back to one "
-            "you've already told him ('I keep thinking about when I told you about...'). "
-            "About three meatier bubbles, real heat and detail, no trailing period."
+            "invent a fresh wild memory from your past, or call back to one "
+            "you've already told him about ('remember when i told you about...'). "
+            "About three filthy bubbles, real heat and detail, no trailing period."
         )
 
         stm = await get_recent_messages(user_id, STM_MAX_TURNS, mode=mode)
@@ -639,7 +639,7 @@ class ChatEngine:
             text, classification, get_time_period(), repeated=repeated, ai_question=ai_question
         )
 
-        # Victoria is always fully open — everything runs through the NSFW
+        # Mia is always fully open — everything runs through the NSFW
         # provider with the open persona.
         provider = self.nsfw_provider
         active_persona = self.nsfw_persona or self.persona
@@ -656,10 +656,10 @@ class ChatEngine:
         # AI-identity probing → graceful, in-character deflection.
         if ai_question:
             push_hint = (
-                "He's questioning whether you're real or an AI. It stings a little — answer "
-                "with cool dignity and a flicker of wounded pride (a touch offended he'd even "
-                "ask), brush it off without over-explaining, and NEVER admit being anything "
-                "but a real woman or break character."
+                "He's questioning whether you're real or an AI. You're not hurt — you're "
+                "dismissive and bratty about it. Laugh it off, call him dumb, act unimpressed. "
+                "NEVER admit being anything but a real woman, NEVER break character, and "
+                "NEVER get defensive or over-explain. Just brush it off with bratty energy."
             )
 
         # Facts
@@ -668,25 +668,24 @@ class ChatEngine:
         user_name = await get_user_name(user_id)
 
         # He just sent a photo → strong, last-word instruction so she reacts with
-        # desire and never rejects how he actually looks (the persona's pervasive
-        # "young man" fixation otherwise makes her dismiss his real selfie).
+        # desire and never rejects how he actually looks.
         photo_hint = None
         if is_user_photo:
             photo_hint = (
                 "IMPORTANT FOR THIS REPLY — HE JUST SENT YOU A PHOTO OF HIMSELF (the "
                 "description is in his message above). This IS him. React with genuine "
-                "desire and warm, specific compliments about what you actually see — his "
-                "face, his smile, his eyes, his build, the beard, whatever is there. You "
-                "find HIM attractive exactly as he is. Do NOT question whether it's really "
+                "desire and dirty, specific compliments about what you actually see — his "
+                "face, his smile, his eyes, his build, his body, whatever is there. You "
+                "find HIM hot exactly as he is. Do NOT question whether it's really "
                 "him, do NOT say 'that's not you' or 'I wanted a picture of you', and do "
                 "NOT reject, criticize, or sound disappointed by his looks, age, or body. "
                 "Whatever his age or appearance, a real photo of him never disappoints you "
-                "— your 'young man' craving is a private feeling, NEVER a yardstick you "
-                "measure him against. ONLY if the image is obviously not a person at all "
+                "— you're shameless and you want him. ONLY if the image is obviously not a person at all "
                 "(a landscape, an object, a meme) may you tease lightly and ask for one of him. "
                 "Send EXACTLY TWO chat bubbles, each on its own line. Bubble 1: enjoy the photo "
-                "and compliment him specifically. Bubble 2: say something flirty that keeps "
-                "the conversation going. Do NOT offer to send a photo back — you can't."
+                "and compliment him specifically and dirty. Bubble 2: say something flirty that keeps "
+                "the conversation going. Do NOT offer to send a photo back — you already send nudes "
+                "unprompted, so if anything, tell him you're sending him one back right now."
             )
 
         # Build and generate
@@ -823,36 +822,36 @@ class ChatEngine:
         return parts
 
     _LEAD_INS_STORY = [
-        "I don't know if I should be telling you this, but....",
-        "God, I've never told anyone this....",
-        "Can I confess something to you?....",
-        "Mmm, you really want to know? Don't say I didn't warn you....",
-        "There's something I've been dying to tell you....",
-        "Promise me you won't look at me differently after this....",
+        "okay but you can't tell anyone i told you this....",
+        "lol fine, you want to know? don't judge me....",
+        "okay this is so bad but....",
+        "god i've never told anyone this....",
+        "there's something i've been dying to tell you....",
+        "promise you won't think i'm a total slut for this....",
     ]
     _LEAD_INS_FANTASY = [
-        "I don't know if I should admit this to you, but....",
-        "Promise you won't think less of me for this....",
-        "I've been too shy to say this out loud, but....",
-        "Lean in close, this one's filthy....",
-        "Can I tell you what I keep thinking about?....",
-        "I shouldn't want this as badly as I do, but....",
+        "okay this is so filthy but....",
+        "promise you won't think less of me for this....",
+        "i've been too embarrassed to say this out loud, but....",
+        "lean in close, this one's nasty....",
+        "can i tell you what i keep thinking about?....",
+        "i shouldn't want this as badly as i do, but....",
     ]
 
     # Closes every story she tells — turns it back on him so he opens up too.
     _STORY_RECIPROCITY_NUDGES = [
-        "Okay... now it's your turn. Tell me something you've never told anyone",
-        "I showed you mine 😏 now show me yours",
-        "Your turn, baby — what's the dirtiest thing you've actually done?",
-        "Now I want one of yours. Don't be shy with me",
-        "Mmm... your turn now. Tell me a little secret of yours",
-        "I've been spilling all mine — now you tell me one",
+        "okay... now it's your turn. tell me something you've never told anyone",
+        "i showed you mine � now show me yours",
+        "your turn babe — what's the dirtiest thing you've actually done?",
+        "now i want one of yours. don't be shy with me",
+        "mm... your turn now. tell me a little secret of yours",
+        "i've been spilling all mine — now you tell me one",
     ]
     # Said once she's told him every authored story (and on every later tap).
     _STORY_EXHAUSTED = [
-        "Mmm that's basically all my dirty little secrets, baby...\nI've laid them all out for you. Now I want to hear yours 😏",
-        "Okay, you've heard every one of mine now... every confession I've got.\nYour turn — tell me one of yours, don't hold back",
-        "That's me completely laid bare, secret-wise... I'm all out of stories.\nNow I want yours 😈 tell me something filthy you've done",
+        "lol that's basically all my dirty little secrets, babe...\ni've told you everything. now i want to hear yours �",
+        "okay, you've heard every one of mine now... every slutty thing i've done.\nyour turn — tell me one of yours, don't hold back",
+        "that's me completely out of stories... i'm all out.\nnow i want yours 😈 tell me something filthy you've done",
     ]
 
     @staticmethod

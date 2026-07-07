@@ -23,10 +23,10 @@ export default function NameScreen({ onSubmit }: Props) {
         className="flex flex-col items-center gap-6 p-8 rounded-2xl bg-[#111118] border border-[var(--border)] max-w-sm w-full mx-4"
       >
         <div className="w-20 h-20 rounded-full bg-gradient-to-br from-purple-600 to-pink-500 flex items-center justify-center text-3xl font-bold text-white">
-          V
+          M
         </div>
         <div className="text-center">
-          <h1 className="text-xl font-bold text-white">Victoria Donovan</h1>
+          <h1 className="text-xl font-bold text-white">Mia</h1>
           <p className="text-[13px] text-[var(--muted)] mt-1">
             Enter your name to start chatting
           </p>

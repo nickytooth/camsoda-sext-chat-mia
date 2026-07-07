@@ -7,10 +7,9 @@ type Slide = { type: "video" | "image"; src: string };
 
 // Slide 1 is the video; the rest are photos. Drop the files in frontend/public/.
 const SLIDES: Slide[] = [
-  { type: "video", src: "/victoria.mp4" },
-  { type: "image", src: "/victoria1.png" },
-  { type: "image", src: "/victoria2.png" },
-  { type: "image", src: "/victoria3.png" },
+  { type: "video", src: "/mia.mp4" },
+  { type: "image", src: "/mia1.png" },
+  { type: "image", src: "/mia2.png" },
 ];
 
 export default function ProfileGallery() {
@@ -55,7 +54,7 @@ export default function ProfileGallery() {
       <div className="w-full aspect-[3/4] bg-gradient-to-b from-purple-900/40 to-black flex items-center justify-center overflow-hidden">
         {failed[index] ? (
           <div className="w-32 h-32 rounded-full bg-gradient-to-br from-purple-600 to-pink-500 flex items-center justify-center text-4xl font-bold text-white">
-            V
+            M
           </div>
         ) : slide.type === "video" ? (
           <video

@@ -91,7 +91,7 @@ export default function ChatBubble({ message, showReceipt, read }: Props) {
         {!isUser && (
           <div className="flex items-end gap-2">
             <div className="w-7 h-7 rounded-full bg-gradient-to-br from-purple-600 to-pink-500 flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white">
-              V
+              M
             </div>
             <div className="bg-[var(--her-bubble)] rounded-2xl rounded-bl-md px-4 py-2.5 text-[14px] leading-relaxed">
               {message.content}
