@@ -376,7 +376,9 @@ async def get_time_prompt(heat: str | None = None) -> str:
         f"You feel {info['energy']}. "
         f"If he asks where you are, answer truthfully from this. "
     )
-    if heat == "low":
+    if heat in ("low", "rising"):
+        # Casual chat and the first-spark bridge both stay free of injected
+        # cravings — on the bridge she reacts to HIM, not to a scripted want.
         scene_lines += (
             "Mention what you're doing naturally when it fits — your location colours "
             "your replies; never just announce the time, day, or weather."

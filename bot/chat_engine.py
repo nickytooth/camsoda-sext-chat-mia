@@ -251,19 +251,31 @@ class ChatEngine:
 
     @staticmethod
     def _conversation_heat(stm: list[dict], current_text: str | None = None) -> str:
-        """How sexual HE is being right now: 'low' | 'medium' | 'high'.
+        """How sexual HE is being right now: 'low' | 'rising' | 'medium' | 'high'.
 
-        Derived from the keyword classifier over his current + recent messages.
-        Her explicitness MIRRORS his — she follows his register instead of
-        railroading every conversation into sex."""
-        recent = [m["content"] for m in stm if m["role"] == "user"][-6:]
-        if current_text is None and recent:
-            current_text = recent[-1]
+        Derived from the keyword classifier over his current + recent messages,
+        so her explicitness MIRRORS his. His first COUPLE of explicit messages
+        in a session land on 'rising' — the bridge where she's clearly pleased
+        and teases hotter and hotter without going fully graphic; his third
+        push unlocks 'high'. Re-entry while the session is already hot is
+        instant (plenty of prior heat in the window — the door's open), but
+        yesterday's sexting doesn't skip today's bridge (~2h window)."""
+        now = time.time()
+        user_msgs = [m for m in stm if m["role"] == "user"]
+        if current_text is None and user_msgs:
+            current_text = user_msgs[-1]["content"]
+        if user_msgs:
+            # STM already contains the persisted current message — it must not
+            # count as "prior" heat or the bridge would never trigger.
+            user_msgs = user_msgs[:-1]
+        prior_nsfw = sum(
+            1 for m in user_msgs[-6:]
+            if now - (m.get("timestamp") or now) < 7200
+            and classify_fast(m["content"]) == "nsfw"
+        )
         if current_text and classify_fast(current_text) == "nsfw":
-            return "high"
-        if any(classify_fast(m) == "nsfw" for m in recent):
-            return "medium"  # the ember: he was hot recently but has cooled off
-        return "low"
+            return "high" if prior_nsfw >= 2 else "rising"
+        return "medium" if prior_nsfw else "low"
 
     # Temperature by mood: hotter when she's worked up, tighter when she's
     # firing back (sharp, less rambly). None-mood defaults to a lively 0.9.
