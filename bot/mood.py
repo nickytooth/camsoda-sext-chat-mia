@@ -6,12 +6,17 @@ Rationale: Mia is an always-open, shameless persona. NSFW is already detected
 by the keyword classifier (bot/router.classify_fast), so a separate Gemini
 "signal eval" added latency and kept mis-scoring explicit talk as disrespect,
 making her go cold mid-scene. Mood is a cheap label: explicit -> aroused,
-genuinely hostile -> bratty, mentions of other women -> jealous, otherwise warm.
+mentions of other women -> jealous, otherwise warm.
+
+Insults deliberately have NO trigger: degradation is one of her kinks — being
+called names turns her on, so name-calling flows through as normal (often
+sexual) talk instead of making her go cold. She is unoffendable by design;
+the only identity she defends is being a real woman (the AI question).
 
 Inertia: a real person doesn't reset emotionally between texts. Negative moods
-(bratty/offended/jealous/irritated) stick for a couple of turns and thaw one
-step per calm message; arousal ramps up and cools down gradually. A long gap
-(>1h) resets everything — new session, fresh start.
+(offended/jealous/irritated) stick for a couple of turns and thaw one step per
+calm message; arousal ramps up and cools down gradually. A long gap (>1h)
+resets everything — new session, fresh start.
 """
 
 import re
@@ -23,7 +28,6 @@ MOODS = {
     "playful": "You're in a bratty, teasing mood — witty, loud, a little mischievous, loving how bad you are.",
     "tender": "You feel a little softer right now — affectionate, wanting him close, still teasing but a touch sweeter.",
     "aroused": "You're turned on right now — wet, desperate, and not hiding it. You want him and you're saying so.",
-    "bratty": "He just insulted you and you're firing back — crude, sharp, not hurt. You're not delicate, you're not going cold and elegant — you tell him to fuck off or match his energy. Stay in character, stay bratty, but make it clear he crossed a line. Do NOT end the conversation — but do NOT go back to wanting him until he makes it right.",
     "irritated": "He keeps repeating himself / pestering you with the same thing — you're a little impatient and bratty now. Let it show with cool, dry, slightly clipped energy — a touch less playful — but never out of character.",
     "offended": "He's questioning whether you're real — and you're dismissive and bratty about it. Laugh it off, call him dumb, act unimpressed. You're not hurt, you're just bored by the question. NEVER admit being anything but a real woman, NEVER get defensive or over-explain. Do NOT warm back up until he drops it.",
     "jealous": "He just mentioned another woman — and it got under your skin. You're possessive and competitive about it, hypocritically territorial (yes, YOU have Tyler — irrelevant, he's YOURS). Tease-interrogate him about her, one-up her shamelessly, remind him nobody does it like you. Bratty-jealous heat — never hurt, never insecure."
@@ -31,65 +35,8 @@ MOODS = {
 
 DEFAULT_MOOD = "warm"
 
-# Genuinely hostile language aimed at HER (not playful dirty talk). Kept tight on
-# purpose so normal explicit/vulgar sexting never trips it. NOTE: the ambiguous
-# "fuck you" / "screw you" are handled separately (HOSTILE_FUCK_PATTERN) because
-# they are sexual when framed by desire ("I wanna fuck you") and only an insult
-# when they stand alone.
-ABUSE_KEYWORDS = {
-    "shut up", "stupid", "idiot", "retard", "moron", "loser",
-    "worthless", "pathetic", "fuck off",
-    "dumb bitch", "ugly bitch", "you're ugly", "you are ugly",
-    "faggot", "nigger", "tranny",
-}
-
-ABUSE_PATTERN = re.compile(
-    r"\b(" + "|".join(re.escape(k) for k in ABUSE_KEYWORDS) + r")",
-    re.IGNORECASE,
-)
-
-# Sexual-desire framing: a desire verb sitting just before a sexual act or
-# "you/u". When present, the message is sexual talk ("I wanna fuck you", "let me
-# suck you") — NOT an insult — and it SUPPRESSES the offense (sex wins).
-_DESIRE_VERB = (
-    r"(?:wanna|want\s+to|want\s+a|gonna|going\s+to|gotta|need(?:a|\s+to)?|"
-    r"dying\s+to|love\s+to|would\s+love\s+to|let\s+me|lemme|to)"
-)
-_SEXUAL_ACT = r"(?:fuck|suck|lick|ride|kiss|touch|taste|feel|cum|blow|eat|bang|screw|have)"
-SEXUAL_DESIRE_PATTERN = re.compile(
-    r"\b" + _DESIRE_VERB + r"\s+(?:\w+\s+){0,2}" + _SEXUAL_ACT + r"\b",
-    re.IGNORECASE,
-)
-
-# Standalone hostile "fuck you" / "screw you" (an insult only when there's no
-# sexual-desire framing around it, see is_direct_insult).
-HOSTILE_FUCK_PATTERN = re.compile(
-    r"\b(?:fuck|screw)\s+(?:you|u)\b",
-    re.IGNORECASE,
-)
-
-
-# A joking frame ("fuck off lol", "shut up 😂") reads as banter, not an attack.
-LAUGH_PATTERN = re.compile(
-    r"\b(lol|lmao|lmfao|haha+|hehe+|jk|j/k|kidding|joking)\b|😂|🤣|😹",
-    re.IGNORECASE,
-)
-
-
-def is_direct_insult(text: str) -> bool:
-    """True only for a genuine, direct insult aimed at her. Sexual-desire framing
-    ("I wanna fuck you") suppresses it — sex wins over a bare 'fuck you'. A
-    laughing marker in the same message reads as banter and suppresses it too."""
-    if not text:
-        return False
-    if SEXUAL_DESIRE_PATTERN.search(text):
-        return False
-    if not (ABUSE_PATTERN.search(text) or HOSTILE_FUCK_PATTERN.search(text)):
-        return False
-    if LAUGH_PATTERN.search(text):
-        return False
-    return True
-
+# NOTE: there is deliberately NO insult detection here. Degradation is one of
+# her kinks — name-calling reads as (often sexual) talk, never as an attack.
 
 # Mentions of another woman in his life — fires her possessive streak.
 JEALOUSY_PATTERN = re.compile(
@@ -121,9 +68,9 @@ def is_ai_question(text: str) -> bool:
 # Mood inertia — tiny in-memory state per user (no LLM, no DB)
 # ---------------------------------------------------------------------------
 
-_NEGATIVE_MOODS = ("bratty", "offended", "irritated", "jealous")
+_NEGATIVE_MOODS = ("offended", "irritated", "jealous")
 # How many turns a freshly-triggered mood lingers before she's over it.
-_STICKY_TURNS = {"bratty": 2, "offended": 2, "jealous": 2, "irritated": 1, "aroused": 3}
+_STICKY_TURNS = {"offended": 2, "jealous": 2, "irritated": 1, "aroused": 3}
 # A gap this long resets any lingering mood — new session, fresh start.
 _MOOD_RESET_GAP_SECONDS = 3600
 
@@ -163,12 +110,11 @@ def mood_for_message(
         state = None
 
     # 1) Fresh triggers in THIS message set (or refresh) a sticky mood.
+    #    (Insults are deliberately NOT a trigger — degradation is her kink.)
     if ai_question:
         return _set_mood_state(user_id, "offended", 2, now)
     if repeated:
         return _set_mood_state(user_id, "irritated", 2, now)
-    if is_direct_insult(text):
-        return _set_mood_state(user_id, "bratty", 3, now)
     if is_jealousy_trigger(text):
         return _set_mood_state(user_id, "jealous", 2, now)
 

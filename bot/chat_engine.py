@@ -269,7 +269,6 @@ class ChatEngine:
     # firing back (sharp, less rambly). None-mood defaults to a lively 0.9.
     _TEMP_BY_MOOD = {
         "aroused": 1.0,
-        "bratty": 0.7,
         "offended": 0.7,
         "irritated": 0.75,
         "jealous": 0.85,

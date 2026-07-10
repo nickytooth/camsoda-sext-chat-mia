@@ -12,6 +12,9 @@ NSFW_KEYWORDS = {
     "fetish", "dildo", "vibrator", "threesome", "oral", "erotic", "seduc",
     "touch yourself", "touch me", "feel you", "inside me", "inside you",
     "make love", "make me cum", "want you", "need you bad",
+    # Degradation is one of her kinks — name-calling IS dirty talk to her,
+    # so it heats the conversation instead of reading as an attack.
+    "slut", "whore", "good girl", "dirty girl",
 }
 
 NSFW_PATTERN = re.compile(

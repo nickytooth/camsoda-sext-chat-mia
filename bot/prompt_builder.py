@@ -145,15 +145,7 @@ async def build_prompt(
             system_parts.append(mood_line)
         # When he's been genuinely insulting, she fires back — crude and sharp.
         # She's not delicate, she doesn't go cold and elegant — she matches his energy.
-        if (mood or {}).get("mood") in ("annoyed", "bratty"):
-            system_parts.append(
-                "HE INSULTED YOU JUST NOW: you fire back — crude, sharp, not hurt. "
-                "You're not delicate, you're not going cold and elegant — you tell him "
-                "to fuck off or match his energy. Stay in character, stay bratty, but "
-                "make it clear he crossed a line. You do NOT end the conversation — but "
-                "you do NOT go back to wanting him until he makes it right."
-            )
-        elif (mood or {}).get("mood") == "offended":
+        if (mood or {}).get("mood") == "offended":
             system_parts.append(
                 "HE QUESTIONED IF YOU'RE REAL: you're dismissive and bratty about it. "
                 "Laugh it off, call him dumb, act unimpressed — you're not hurt, you're "
