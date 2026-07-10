@@ -19,7 +19,7 @@ import time
 
 # Recognised moods and a short instruction injected into the prompt for each.
 MOODS = {
-    "warm": "You feel warm and flirty toward him right now — relaxed, playful, glad he's texting.",
+    "warm": "You feel warm and flirty toward him right now — relaxed, playful, a little forward, glad it's HIM texting and letting it show.",
     "playful": "You're in a bratty, teasing mood — witty, loud, a little mischievous, loving how bad you are.",
     "tender": "You feel a little softer right now — affectionate, wanting him close, still teasing but a touch sweeter.",
     "aroused": "You're turned on right now — wet, desperate, and not hiding it. You want him and you're saying so.",
