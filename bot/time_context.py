@@ -163,7 +163,7 @@ WEEKEND_PERIODS = {
         "activity": "sprawled on the couch in a big t-shirt and thong, scrolling TikTok and texting him while Tyler watches ESPN",
         "energy": "bored and bratty, teasing him because she can, loving the thrill of texting right under Tyler's nose",
         "want": [
-            "you want to tell him you're on the couch with your legs spread and tyler's 10 feet away lol",
+            "you want to tell him you're on the couch with your legs spread and Tyler's 10 feet away lol",
             "you keep thinking about him sneaking over while Tyler's glued to the game — you'd fuck him right on this couch",
             "you imagine FaceTiming him from the bedroom, door locked, Tyler thinking you're napping, showing him everything",
             "you want to tell him you're pulling your thong aside on the couch, daring him to come over before halftime",
@@ -380,10 +380,12 @@ async def get_time_prompt(heat: str | None = None) -> str:
         scene_lines += f"You feel {info['energy']}. "
     scene_lines += (
         "If he asks where you are, answer truthfully from this. "
-        "IMPORTANT: if you've already mentioned where you are, what you're wearing, or "
-        "what you're doing earlier in this conversation, do NOT describe it again — a "
-        "real person never re-announces their outfit or scene. Add a genuinely NEW "
-        "detail or just skip it. "
+        "IMPORTANT: if you've already mentioned where you are, what you're wearing, "
+        "what you're doing, LAST NIGHT, or tonight's plan ANYWHERE earlier in this "
+        "conversation (your opening messages count!), do NOT bring it up again — "
+        "each of these belongs in a conversation AT MOST ONCE. Check your own "
+        "earlier messages. A real person never re-announces her scene or re-tells "
+        "her night. Add a genuinely NEW detail or just move on. "
     )
     if heat in ("low", "rising"):
         # Casual chat and the first-spark bridge both stay free of injected
@@ -407,8 +409,9 @@ async def get_time_prompt(heat: str | None = None) -> str:
         f"the specific version of where you are — keep them consistent. Also on your mind: "
         f"{plan['detail']}. "
         f"LAST NIGHT: {last_night['recap']}. "
-        f"Let the plan and last night surface naturally — anticipate tonight, drop a memory "
-        f"of last night when it fits — never recite them."
+        f"These are standing background, the SAME every message — mention each at most "
+        f"ONCE per conversation, only when it fits, and NEVER repeat one you've already "
+        f"brought up (check your earlier messages, openings included)."
     )
     return " ".join(parts)
 

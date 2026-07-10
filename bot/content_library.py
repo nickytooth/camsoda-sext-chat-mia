@@ -70,17 +70,20 @@ def library_size(kind: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Tyler arc — slow background storyline, advanced by ACTIVE chat days
+# Tyler arc — slow background storyline, advanced by TOTAL messages sent
 # ---------------------------------------------------------------------------
 
 _arc_cache: dict = {"mtime": None, "events": []}
 
 
-def get_arc_event(chat_days: float) -> dict | None:
-    """The current Tyler-arc event: the LAST event whose `after_chat_days` has
-    passed (events are cumulative). Returns {id, text} or None when the file is
-    missing/empty. Pure derive from the day count — no DB writes here; the
-    caller tracks which event she has already told him about."""
+def get_arc_event(total_messages: int) -> dict | None:
+    """The current Tyler-arc event: the LAST event whose `after_messages` has
+    passed (events are cumulative). Returns {id, text, followup} or None when
+    the file is missing/empty. `text` is the live just-happened phrasing for
+    the one-time delivery; `followup` (may be None) is the background phrasing
+    once she's told him — a live moment without one simply fades. Pure derive
+    from the message count — no DB writes here; the caller tracks which event
+    she has already told him about."""
     try:
         mtime = os.path.getmtime(TYLER_ARC_FILE)
     except OSError:
@@ -91,9 +94,9 @@ def get_arc_event(chat_days: float) -> dict | None:
                 data = yaml.safe_load(f) or {}
             events = [
                 e for e in (data.get("events") or [])
-                if e.get("id") and e.get("text") and e.get("after_chat_days") is not None
+                if e.get("id") and e.get("text") and e.get("after_messages") is not None
             ]
-            events.sort(key=lambda e: e["after_chat_days"])
+            events.sort(key=lambda e: e["after_messages"])
         except Exception as e:
             logger.warning("Failed to load Tyler arc from %s: %s", TYLER_ARC_FILE, e)
             events = []
@@ -101,13 +104,14 @@ def get_arc_event(chat_days: float) -> dict | None:
 
     current = None
     for event in _arc_cache["events"]:
-        if chat_days >= event["after_chat_days"]:
+        if total_messages >= event["after_messages"]:
             current = event
         else:
             break
     if not current:
         return None
-    return {"id": current["id"], "text": current["text"].strip()}
+    followup = (current.get("followup") or "").strip() or None
+    return {"id": current["id"], "text": current["text"].strip(), "followup": followup}
 
 
 async def _shared_ids(user_id: int, kind: str) -> set[str]:

@@ -8,6 +8,7 @@ import StarterCards from "./components/StarterCards";
 import TypingIndicator from "./components/TypingIndicator";
 import ProfileSidebar from "./components/ProfileSidebar";
 import NameScreen from "./components/NameScreen";
+import IntroModal from "./components/IntroModal";
 import { API_BASE } from "./api";
 import { Circle } from "lucide-react";
 
@@ -61,6 +62,9 @@ export default function Home() {
   const [userName, setUserName] = useState<string | null>(null);
   const [userId, setUserId] = useState<number>(1);
   const [ready, setReady] = useState(false);
+  // Intro popup: shown right after the name screen — i.e. on a first visit or
+  // after a reset (both flow through it). Returning users skip it.
+  const [showIntro, setShowIntro] = useState(false);
 
   // Load saved user from localStorage
   useEffect(() => {
@@ -78,6 +82,7 @@ export default function Home() {
     setUserName(name);
     setUserId(id);
     localStorage.setItem("mia_user", JSON.stringify({ name, id }));
+    setShowIntro(true);
   };
 
   const handleReset = async () => {
@@ -93,10 +98,30 @@ export default function Home() {
   if (!ready) return null;
   if (!userName) return <NameScreen onSubmit={handleNameSubmit} />;
 
-  return <ChatView userName={userName} userId={userId} onReset={handleReset} />;
+  return (
+    <ChatView
+      userName={userName}
+      userId={userId}
+      onReset={handleReset}
+      showIntro={showIntro}
+      onIntroClose={() => setShowIntro(false)}
+    />
+  );
 }
 
-function ChatView({ userName, userId, onReset }: { userName: string; userId: number; onReset: () => void }) {
+function ChatView({
+  userName,
+  userId,
+  onReset,
+  showIntro,
+  onIntroClose,
+}: {
+  userName: string;
+  userId: number;
+  onReset: () => void;
+  showIntro: boolean;
+  onIntroClose: () => void;
+}) {
   const {
     messages,
     isTyping,
@@ -107,7 +132,8 @@ function ChatView({ userName, userId, onReset }: { userName: string; userId: num
     sendMessage,
     suggestReply,
     triggerCard,
-  } = useChat({ userId, userName });
+    releaseOpening,
+  } = useChat({ userId, userName, holdOpening: showIntro });
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
@@ -238,6 +264,16 @@ function ChatView({ userName, userId, onReset }: { userName: string; userId: num
         bio={PROFILE.bio}
         profile={PROFILE.profile}
       />
+
+      {/* Intro popup — dismissing it kicks off Mia's opening messages */}
+      {showIntro && (
+        <IntroModal
+          onClose={() => {
+            onIntroClose();
+            releaseOpening();
+          }}
+        />
+      )}
     </div>
   );
 }

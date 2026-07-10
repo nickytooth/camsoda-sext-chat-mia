@@ -228,7 +228,7 @@ class ChatEngine:
     _GRACEFUL_DEFLECTIONS_TEASING = [
         "wait i got completely distracted lol... say that again?",
         "ok my brain just glitched. one more time?",
-        "hold on, jess just texted me a whole essay... what were you saying?",
+        "hold on, Jess just texted me a whole essay... what were you saying?",
         "lol you broke me. come back to that for me?",
         "wait what. say that again, i need the full version",
     ]
@@ -758,21 +758,22 @@ class ChatEngine:
         if heat == "rising" and mood.get("mood") == "aroused":
             mood = {"mood": "sparked", "intensity": mood.get("intensity", 2)}
 
-        # Tyler arc: a slow background storyline advanced by ACTIVE chat days
-        # (distinct days he actually messaged) — her life visibly moves every
-        # time he comes back on a new day. A freshly-unlocked event she TELLS
-        # him about once, like a life update — but NEVER mid-scene: while the
-        # chat is hot the news waits (untold) for the next calm turn.
+        # Tyler arc: a slow background storyline advanced by how many messages
+        # he's sent — her life moves at the pace of the conversation itself.
+        # A freshly-unlocked event she TELLS him about once, like a live life
+        # update — but NEVER mid-scene: while the chat is hot (rising/high)
+        # the news waits (untold) for the next calm turn. Once told, the
+        # event's `followup` phrasing becomes quiet background; a live moment
+        # without a followup simply fades so it can't go stale.
         arc_note = None
-        active_days = (prev_state["active_days"] if prev_state else 0) or 0
-        arc_days = max(0, active_days - 1)  # day 1 of chatting == arc day 0
-        arc_event = get_arc_event(arc_days)
+        total_messages = (prev_state["total_messages"] if prev_state else 0) or 0
+        arc_event = get_arc_event(total_messages)
         if arc_event:
             told_arc_id = prev_state["last_arc_id"] if prev_state else None
-            # The day-0 baseline is the status quo, not news — background only.
-            # Real events (arc_days >= 1) imply a second chat day, so the
-            # engagement row exists and set_last_arc_id can persist the mark.
-            is_news = arc_days >= 1 and arc_event["id"] != told_arc_id
+            # The opening baseline (threshold 0) is the status quo, not news.
+            # Real events imply prior messages, so the engagement row exists
+            # and set_last_arc_id can persist the mark.
+            is_news = total_messages >= 1 and arc_event["id"] != told_arc_id
             if is_news and heat not in ("rising", "high"):
                 arc_note = (
                     "LIFE UPDATE — this JUST happened in your life and you haven't told "
@@ -781,11 +782,16 @@ class ChatEngine:
                     f"{arc_event['text']}"
                 )
                 await set_last_arc_id(user_id, arc_event["id"])
-            else:
+            elif is_news:
+                # Hot right now — keep the fresh news out entirely; it will be
+                # delivered on the next calm turn (last_arc_id stays unset).
+                arc_note = None
+            elif arc_event["followup"]:
                 arc_note = (
-                    "ONGOING WITH TYLER (background truth. It colors your mood but it "
-                    "is NOT a talking point — reference it only if he brings it up or "
-                    f"it genuinely fits; otherwise stay off Tyler entirely): {arc_event['text']}"
+                    "ONGOING WITH TYLER (background truth you've already told him "
+                    "about. It colors your mood but it is NOT a talking point — "
+                    "reference it only if he brings it up or it genuinely fits; "
+                    f"otherwise stay off Tyler entirely): {arc_event['followup']}"
                 )
 
         # Scene pinning: if the time-of-day scene changed since her last reply

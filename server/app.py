@@ -6,6 +6,7 @@ Replaces the Telegram bot with HTTP + WebSocket endpoints.
 import asyncio
 import json
 import logging
+import random
 import time
 import base64
 from contextlib import asynccontextmanager
@@ -105,6 +106,22 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 # so the frontend is the single source of truth for profile display.
 
 
+# Inspiration angles for the LLM-generated opening — one is sampled per
+# generation so first messages land on a different casual excuse every time.
+# They are hints, not scripts: the instruction tells her to invent her own.
+_OPENING_ANGLES = [
+    "you're bored and scrolling your contacts and landed on his name",
+    "something you just saw or heard randomly reminded you of him",
+    "you just got home and the apartment is too quiet",
+    "you can't sleep and everyone else is asleep or out",
+    "a song is playing that puts you in a mood and he came to mind",
+    "your friends are being boring tonight and he's the more interesting option",
+    "you almost texted him yesterday, chickened out, and tonight you didn't",
+    "you're having a drink and feeling brave",
+    "your day was chaotic and he's the person you felt like telling",
+]
+
+
 async def _generate_dynamic_opening(engine: ChatEngine) -> str:
     """Ask the LLM to write Mia's opening message — fresh every time.
 
@@ -118,22 +135,30 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
     # a teasing hook, not explicit — HE is the one who unlocks that register.
     persona_prompt = engine.persona.to_system_prompt(include_unlocked=False)
     time_prompt = await get_time_prompt(heat="low")
+    # One randomly-picked angle as INSPIRATION (never a script) so openings
+    # land on a different excuse every time instead of one canned reason.
+    angle = random.choice(_OPENING_ANGLES)
     messages = [
         {
             "role": "system",
             "content": (
                 f"{persona_prompt}\n\n"
                 f"{time_prompt}\n\n"
-                "You are starting a conversation with him for the first time. "
-                "Write your opening message — the thing you finally worked up "
-                "the nerve to say after wanting to since Tyler's birthday party. "
-                "Ground it in where you actually are and the time of day RIGHT NOW (above) — never "
-                "reference a different place or time. 2-3 short texts maximum, "
-                "each on its own line. No period at the end. Be natural, be real, "
-                "be yourself — flirty, teasing, provocative: a hook that makes him HAVE "
-                "to reply. NOT explicit — no 'wet', no anatomy, no graphic desires; you "
-                "never cross that line first. Do NOT use the same phrasing as your "
-                "opening_lines — say something fresh."
+                "You are texting him FIRST, starting the conversation. Invent a fresh, "
+                "casual reason you're reaching out RIGHT NOW — something true to where "
+                "you are and what you're doing at this exact moment (above). "
+                f"For inspiration only (do NOT copy it, invent your own if better): {angle}. "
+                "STRUCTURE: 2-3 short texts, each on its own line. The FIRST text is "
+                "ALWAYS just a short greeting — like 'hey', 'heyy', 'hey you 😏', 'hey, "
+                "how are you' — in your own words, vary it every time. THEN the next "
+                "text(s) carry the reason you're texting. No period at the "
+                "end. Flirty, teasing, a little forward — a hook that makes him HAVE to "
+                "reply. NOT explicit — no 'wet', no anatomy, no graphic desires; you "
+                "never cross that line first. Tyler's birthday party is old backstory — "
+                "do NOT use it as your reason for texting. Do NOT mention your friends "
+                "by name (Jess, Cara, Lena) in this opening — he doesn't know them yet; "
+                "Tyler is fine to mention. Do NOT reuse the phrasing of your "
+                "opening_lines — say something fresh, in your own words."
             ),
         },
         {"role": "user", "content": "(he hasn't said anything yet — you're texting first)"},
@@ -394,6 +419,42 @@ def _latinize_name(name: str) -> str:
     return "".join(out)
 
 
+async def _maybe_send_opening(user_id: int) -> None:
+    """Mia's one-time opening — fired when the CLIENT says it's ready (the
+    'start' event, sent after the intro popup is dismissed), not on raw
+    connect, so her first messages land while the user is actually looking.
+
+    Guarded by BOTH existing history (persists across restarts) and an
+    in-memory in-progress set (covers concurrent reconnects / StrictMode
+    double-mount), so a reload/reconnect never regenerates a fresh opening."""
+    if not engine or user_id in _openings_started:
+        return
+    existing = await get_all_messages(user_id, mode="sexting")
+    if existing:
+        return
+    _openings_started.add(user_id)
+    # Tell the client an opening is in progress so it can lock the input
+    # for its whole duration (generation + streamed bubbles). opening_end
+    # is in a finally so the input can never get stuck disabled.
+    await manager.send_json(user_id, {"type": "opening_start"})
+    try:
+        await manager.send_json(user_id, {"type": "typing_start"})
+        try:
+            opening = await _generate_dynamic_opening(engine)
+        except Exception:
+            logger.warning("Dynamic opening failed, falling back to static", exc_info=True)
+            opening = engine.persona.get_random_opening()
+        parts = [p.strip() for p in opening.split("\n") if p.strip()]
+        from bot.memory.stm import add_message as stm_add
+        for part in parts:
+            await stm_add(user_id, "assistant", part, mode="sexting")
+        response = ChatResponse(messages=parts)
+        await _send_response_with_typing(user_id, response, mode="sexting")
+    finally:
+        await manager.send_json(user_id, {"type": "opening_end"})
+    _schedule_idle_nudge(user_id)
+
+
 @app.websocket("/ws/chat")
 async def websocket_chat(ws: WebSocket, user_id: int = Query(default=None), user_name: str = Query(default=None)):
     user_id = user_id or DEFAULT_USER_ID
@@ -405,37 +466,6 @@ async def websocket_chat(ws: WebSocket, user_id: int = Query(default=None), user
         from bot.memory.facts import upsert_fact
         await upsert_fact(user_id, "name", _latinize_name(user_name))
 
-    # New user — Mia initiates with a dynamically generated opening, ONCE.
-    # Guard on BOTH existing history (persists across restarts) and an in-memory
-    # in-progress set (covers concurrent reconnects / StrictMode double-mount),
-    # so a reload/reconnect never regenerates a fresh opening. The old guard used
-    # count_turns() — which counts only USER messages — so it stayed 0 until the
-    # user replied and re-fired an opening on every reconnect.
-    if engine and user_id not in _openings_started:
-        existing = await get_all_messages(user_id, mode="sexting")
-        if not existing:
-            _openings_started.add(user_id)
-            # Tell the client an opening is in progress so it can lock the input
-            # for its whole duration (generation + streamed bubbles). opening_end
-            # is in a finally so the input can never get stuck disabled.
-            await manager.send_json(user_id, {"type": "opening_start"})
-            try:
-                await manager.send_json(user_id, {"type": "typing_start"})
-                try:
-                    opening = await _generate_dynamic_opening(engine)
-                except Exception:
-                    logger.warning("Dynamic opening failed, falling back to static", exc_info=True)
-                    opening = engine.persona.get_random_opening()
-                parts = [p.strip() for p in opening.split("\n") if p.strip()]
-                from bot.memory.stm import add_message as stm_add
-                for part in parts:
-                    await stm_add(user_id, "assistant", part, mode="sexting")
-                response = ChatResponse(messages=parts)
-                await _send_response_with_typing(user_id, response, mode="sexting")
-            finally:
-                await manager.send_json(user_id, {"type": "opening_end"})
-            _schedule_idle_nudge(user_id)
-
     try:
         while True:
             raw = await ws.receive_text()
@@ -444,6 +474,12 @@ async def websocket_chat(ws: WebSocket, user_id: int = Query(default=None), user
             msg_type = data.get("type", "message")
             mode = data.get("mode", "sexting")
             text = data.get("content", "").strip()
+
+            # Client is ready for the one-time opening (intro popup dismissed,
+            # or no popup was needed). Idempotent — see _maybe_send_opening.
+            if msg_type == "start":
+                await _maybe_send_opening(user_id)
+                continue
 
             # Card request (Hear a fantasy / Hear a story): pull from the library.
             if msg_type == "card":

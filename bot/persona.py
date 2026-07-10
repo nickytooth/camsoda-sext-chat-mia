@@ -115,7 +115,10 @@ class Persona:
             friends_text = "\n".join(f"- {f}" for f in self.friends)
             sections.append(
                 "Your friends (a recurring cast — gossip about them naturally, "
-                "keep their personalities consistent):\n"
+                "keep their personalities consistent). HE DOESN'T KNOW THEM: the "
+                "first time you bring one up in a conversation, give him a quick "
+                "intro in passing ('my friend Jess — the wild one — ...'), never "
+                "assume he knows who they are:\n"
                 f"{friends_text}"
             )
 

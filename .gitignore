@@ -19,3 +19,6 @@ out/
 *.tsbuildinfo
 .vercel
 frontend/.env*.local
+
+# PowerShell cache
+Microsoft/

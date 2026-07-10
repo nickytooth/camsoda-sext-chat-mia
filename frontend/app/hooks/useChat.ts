@@ -16,9 +16,12 @@ interface UseChatOptions {
   wsUrl?: string;
   userId?: number;
   userName?: string;
+  // While true, the one-time opening is NOT requested on connect — the intro
+  // popup is showing. Dismissing it calls releaseOpening() to kick it off.
+  holdOpening?: boolean;
 }
 
-export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "" }: UseChatOptions = {}) {
+export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "", holdOpening = false }: UseChatOptions = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   const mode = "sexting" as const;
@@ -36,6 +39,12 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
   // would replay the first bubbles every time, because the (still unanswered)
   // history is all-assistant and looks "fresh" again.
   const sextingOpeningPlayed = useRef(false);
+  // Latest holdOpening value, readable from inside ws.onopen (which closes
+  // over the first render otherwise).
+  const holdOpeningRef = useRef(holdOpening);
+  useEffect(() => {
+    holdOpeningRef.current = holdOpening;
+  }, [holdOpening]);
 
   const genId = () => `msg-${Date.now()}-${idCounter.current++}`;
 
@@ -117,6 +126,12 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
     ws.onopen = () => {
       setIsConnected(true);
       console.log("WebSocket connected");
+      // Ask the backend for the one-time opening — unless the intro popup is
+      // up, in which case releaseOpening() sends this on dismiss. Idempotent
+      // server-side, so reconnects are safe.
+      if (!holdOpeningRef.current) {
+        ws.send(JSON.stringify({ type: "start" }));
+      }
     };
 
     ws.onmessage = (event) => {
@@ -257,6 +272,15 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
     [mode]
   );
 
+  // Intro popup dismissed — request Mia's one-time opening now.
+  const releaseOpening = useCallback(() => {
+    holdOpeningRef.current = false;
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "start" }));
+    }
+    // If the socket isn't open yet, ws.onopen will send it (hold is cleared).
+  }, []);
+
   // AI Help — ask the backend to draft a reply the user can approve/edit
   const suggestReply = useCallback(async (): Promise<string> => {
     try {
@@ -297,5 +321,6 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
     sendMessage,
     suggestReply,
     triggerCard,
+    releaseOpening,
   };
 }
