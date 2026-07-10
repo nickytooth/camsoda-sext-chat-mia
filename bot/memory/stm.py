@@ -8,13 +8,16 @@ async def add_message(
     content: str,
     mode: str = "sexting",
     image_url: str | None = None,
+    tag: str | None = None,
 ) -> None:
+    """Persist a message. `tag` marks special content (e.g. 'fantasy_card' /
+    'story_card') so the summarizer can treat it as fiction, not real events."""
     conn = await get_connection()
     try:
         await conn.execute(
-            "INSERT INTO messages (user_id, role, content, timestamp, mode, image_url) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, role, content, time.time(), mode, image_url),
+            "INSERT INTO messages (user_id, role, content, timestamp, mode, image_url, tag) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, role, content, time.time(), mode, image_url, tag),
         )
         await conn.commit()
     finally:
@@ -64,20 +67,20 @@ async def get_oldest_messages(user_id: int, limit: int, mode: str | None = "sext
     try:
         if mode is None:
             cursor = await conn.execute(
-                "SELECT id, role, content, timestamp, mode FROM messages "
+                "SELECT id, role, content, timestamp, mode, tag FROM messages "
                 "WHERE user_id = ? ORDER BY timestamp ASC LIMIT ?",
                 (user_id, limit * 2),
             )
         else:
             cursor = await conn.execute(
-                "SELECT id, role, content, timestamp, mode FROM messages "
+                "SELECT id, role, content, timestamp, mode, tag FROM messages "
                 "WHERE user_id = ? AND mode = ? ORDER BY timestamp ASC LIMIT ?",
                 (user_id, mode, limit * 2),
             )
         rows = await cursor.fetchall()
         return [
             {"id": row["id"], "role": row["role"], "content": row["content"],
-             "timestamp": row["timestamp"], "mode": row["mode"]}
+             "timestamp": row["timestamp"], "mode": row["mode"], "tag": row["tag"]}
             for row in rows
         ]
     finally:

@@ -222,6 +222,41 @@ async def update_memory(
         await conn.close()
 
 
+async def get_recent_by_category(
+    user_id: int, categories: list[str], limit: int = 2, mode: str | None = None
+) -> list[dict]:
+    """Most recent memories of the given categories (e.g. 'thread' for open
+    conversational loops, 'event' for things he mentioned doing). Cheap SQL
+    only — no embeddings — used by re-engagement and gap follow-ups."""
+    if not categories:
+        return []
+    conn = await get_connection()
+    try:
+        placeholders = ",".join("?" for _ in categories)
+        if mode is None:
+            cursor = await conn.execute(
+                f"SELECT id, category, content, importance, created_at FROM memories "
+                f"WHERE user_id = ? AND category IN ({placeholders}) "
+                "ORDER BY created_at DESC LIMIT ?",
+                (user_id, *categories, limit),
+            )
+        else:
+            cursor = await conn.execute(
+                f"SELECT id, category, content, importance, created_at FROM memories "
+                f"WHERE user_id = ? AND mode = ? AND category IN ({placeholders}) "
+                "ORDER BY created_at DESC LIMIT ?",
+                (user_id, mode, *categories, limit),
+            )
+        rows = await cursor.fetchall()
+        return [
+            {"id": r["id"], "category": r["category"], "content": r["content"],
+             "importance": r["importance"], "created_at": r["created_at"]}
+            for r in rows
+        ]
+    finally:
+        await conn.close()
+
+
 async def count_memories(user_id: int, mode: str | None = None) -> int:
     conn = await get_connection()
     try:

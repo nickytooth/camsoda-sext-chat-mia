@@ -19,13 +19,14 @@ SUMMARIZE_PROMPT = """Analyze the following conversation and extract TWO things:
    Also include any other notable preferences or details as custom keys (e.g. "favorite_color", "pet_name", "kinks").
 
 IMPORTANT — FICTION vs REALITY:
-Lines tagged [STORY] are fictional role-play set in an imaginary scene. They are
-NOT real facts about the user. Do NOT extract story-mode events, settings, or
-role-play personas as real "facts" or identity memories about the user. Only
-extract real-world details the user genuinely revealed about themselves
-(typically from untagged / sexting lines). You MAY record a low-importance
-"thread" memory about an ongoing story if it helps continuity, but never as a
-real fact.
+Lines tagged [STORY] or [FANTASY] are fiction: role-play scenes, invented
+fantasies, or erotic stories the bot told. The events in them did NOT happen
+between the user and the bot. Do NOT extract their events, settings, or
+personas as real "facts" or identity memories. Only extract real-world details
+the user genuinely revealed about themselves (typically from untagged lines).
+You MAY record a low-importance "thread" memory about an ongoing story or a
+fantasy already shared (for continuity / avoiding repeats), but never as a
+real event or fact.
 
 Return ONLY a JSON object with both keys. No other text.
 
@@ -78,7 +79,14 @@ def _format_messages_for_summary(messages: list[dict]) -> str:
     lines = []
     for msg in messages:
         prefix = "User" if msg["role"] == "user" else "Bot"
-        tag = "[STORY] " if msg.get("mode") == "story" else ""
+        if msg.get("mode") == "story":
+            tag = "[STORY] "
+        elif msg.get("tag") in ("fantasy_card", "story_card"):
+            # Card-delivered fiction (fantasies/stories she told) — must never be
+            # summarized as real events between her and the user.
+            tag = "[FANTASY] "
+        else:
+            tag = ""
         lines.append(f"{tag}{prefix}: {msg['content']}")
     return "\n".join(lines)
 

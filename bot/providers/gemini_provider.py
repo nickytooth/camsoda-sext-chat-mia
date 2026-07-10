@@ -19,12 +19,15 @@ class GeminiProvider(LLMProvider):
         # short generations. Leave None to keep the model's default behaviour.
         self._thinking_budget = thinking_budget
 
-    def _build_config(self, system_msg: str | None = None) -> "genai.types.GenerateContentConfig":
+    def _build_config(
+        self, system_msg: str | None = None, temperature: float | None = None
+    ) -> "genai.types.GenerateContentConfig":
         # Safety filters are disabled across the board: this provider also runs
         # summarization/classification over explicit sexting transcripts, which
         # the default filters would otherwise drop (empty response).
         return genai.types.GenerateContentConfig(
             system_instruction=system_msg if system_msg else None,
+            temperature=temperature,
             # Cap, not a forced length: short classifications stay short, but
             # long summarization/compaction JSON won't get truncated mid-object.
             max_output_tokens=2048,
@@ -40,7 +43,7 @@ class GeminiProvider(LLMProvider):
             ],
         )
 
-    async def generate(self, messages: list[dict]) -> str:
+    async def generate(self, messages: list[dict], temperature: float | None = None) -> str:
         client = _get_client()
 
         system_msg = ""
@@ -55,7 +58,7 @@ class GeminiProvider(LLMProvider):
         response = await client.aio.models.generate_content(
             model=self._model,
             contents=contents,
-            config=self._build_config(system_msg),
+            config=self._build_config(system_msg, temperature),
         )
         if response.text is None:
             raise RuntimeError("Gemini returned empty response (likely safety-filtered)")

@@ -115,7 +115,9 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
     """
     from bot.time_context import get_time_prompt
     persona_prompt = engine.persona.to_system_prompt()
-    time_prompt = await get_time_prompt()
+    # heat="low": the conversation hasn't started, so the opening must be a
+    # teasing hook, not explicit — HE is the one who unlocks that register.
+    time_prompt = await get_time_prompt(heat="low")
     messages = [
         {
             "role": "system",
@@ -128,7 +130,9 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
                 "Ground it in where you actually are and the time of day RIGHT NOW (above) — never "
                 "reference a different place or time. 2-3 short texts maximum, "
                 "each on its own line. No period at the end. Be natural, be real, "
-                "be yourself — crude, shameless, flirty. Do NOT use the same phrasing as your "
+                "be yourself — flirty, teasing, provocative: a hook that makes him HAVE "
+                "to reply. NOT explicit — no 'wet', no anatomy, no graphic desires; you "
+                "never cross that line first. Do NOT use the same phrasing as your "
                 "opening_lines — say something fresh."
             ),
         },
@@ -203,6 +207,8 @@ async def reset_user(user_id: int = Query(default=None)):
         engine.clear_user_state(uid)
     from bot.memory.ltm import clear_retrieval_state
     clear_retrieval_state(uid)
+    from bot.mood import clear_mood_state
+    clear_mood_state(uid)
 
     return {"status": "ok", "user_id": uid}
 
@@ -365,15 +371,39 @@ async def _send_response_with_typing(
 
 
 
+# Cyrillic → Latin transliteration (Bulgarian-style), so Mia — who "only speaks
+# English" — gets a name she can actually use naturally ("Нико" → "Niko").
+_CYR_MAP = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ж": "zh",
+    "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n",
+    "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f",
+    "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sht", "ъ": "a",
+    "ь": "y", "ю": "yu", "я": "ya", "ы": "y", "э": "e", "ё": "e",
+}
+
+
+def _latinize_name(name: str) -> str:
+    out = []
+    for ch in name:
+        low = ch.lower()
+        if low in _CYR_MAP:
+            t = _CYR_MAP[low]
+            out.append(t.capitalize() if ch.isupper() else t)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 @app.websocket("/ws/chat")
 async def websocket_chat(ws: WebSocket, user_id: int = Query(default=None), user_name: str = Query(default=None)):
     user_id = user_id or DEFAULT_USER_ID
     await manager.connect(user_id, ws)
 
-    # Save user name as a fact (so Mia knows who she's talking to)
+    # Save user name as a fact (so Mia knows who she's talking to). Cyrillic
+    # names are transliterated so she can use them in English text.
     if user_name:
         from bot.memory.facts import upsert_fact
-        await upsert_fact(user_id, "name", user_name)
+        await upsert_fact(user_id, "name", _latinize_name(user_name))
 
     # New user — Mia initiates with a dynamically generated opening, ONCE.
     # Guard on BOTH existing history (persists across restarts) and an in-memory

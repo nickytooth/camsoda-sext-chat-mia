@@ -13,15 +13,15 @@ from dataclasses import dataclass, field
 
 from bot.persona import Persona, load_persona
 from bot.memory.stm import add_message, get_recent_messages, count_turns
-from bot.memory.ltm import retrieve_relevant, should_retrieve
+from bot.memory.ltm import retrieve_relevant, should_retrieve, get_recent_by_category
 from bot.memory.summarizer import maybe_summarize, maybe_compact
 from bot.memory.facts import get_facts, format_facts_for_prompt, get_user_name
 from bot.prompt_builder import build_prompt
 from bot.router import classify_fast
 from bot.engagement import track_message, get_engagement_state, record_reengage
-from bot.mood import mood_for_message, is_ai_question
-from bot.content_library import pick_unshared, mark_shared, get_examples, library_size
-from bot.time_context import get_time_period, get_preferred_tags, get_scene
+from bot.mood import mood_for_message, is_ai_question, clear_mood_state
+from bot.content_library import pick_unshared, mark_shared, get_examples, library_size, get_arc_event
+from bot.time_context import get_time_period, get_preferred_tags, get_scene, describe_period
 from bot.providers.base import LLMProvider
 from bot.config import STM_MAX_TURNS, UPLOADS_DIR, LLM_TIMEOUT_SECONDS
 from bot.memory.db import get_connection
@@ -153,6 +153,10 @@ class ChatEngine:
         self._batch_tasks: dict[int, asyncio.Task] = {}
         self._last_activity: dict[int, float] = {}
         self._processing_lock: dict[int, asyncio.Lock] = {}
+        # Scene pinning: (period_name, pinned_at) per user. Detects when the
+        # time-of-day scene changes MID-conversation so she announces the move
+        # ("ok just got to the bar") instead of silently teleporting.
+        self._pinned_scene: dict[int, tuple[str, float]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -219,7 +223,16 @@ class ChatEngine:
     # Soft, in-character lines used ONLY as a last resort, when both the primary
     # (Grok) and the fallback (Gemini) return nothing/refuse. They keep the
     # conversation alive instead of leaving the user staring at silence.
-    _GRACEFUL_DEFLECTIONS = [
+    # Two pools so the fallback matches the conversation's register: teasing
+    # when the chat is casual, explicit only when he already made it sexual.
+    _GRACEFUL_DEFLECTIONS_TEASING = [
+        "wait i got completely distracted lol... say that again?",
+        "ok my brain just glitched. one more time?",
+        "hold on, jess just texted me a whole essay... what were you saying?",
+        "lol you broke me. come back to that for me?",
+        "wait what. say that again, i need the full version",
+    ]
+    _GRACEFUL_DEFLECTIONS_EXPLICIT = [
         "fuck my brain just short-circuited... say that again?",
         "wait i got distracted thinking about your cock... what were you saying?",
         "hold on, i'm still recovering from that... tell me again?",
@@ -228,10 +241,50 @@ class ChatEngine:
     ]
 
     @staticmethod
-    def _graceful_deflection() -> str:
-        return random.choice(ChatEngine._GRACEFUL_DEFLECTIONS)
+    def _graceful_deflection(heat: str = "low") -> str:
+        pool = (
+            ChatEngine._GRACEFUL_DEFLECTIONS_EXPLICIT
+            if heat == "high"
+            else ChatEngine._GRACEFUL_DEFLECTIONS_TEASING
+        )
+        return random.choice(pool)
 
-    async def _generate_with_fallback(self, provider: LLMProvider, prompt_messages: list[dict]) -> str:
+    @staticmethod
+    def _conversation_heat(stm: list[dict], current_text: str | None = None) -> str:
+        """How sexual HE is being right now: 'low' | 'medium' | 'high'.
+
+        Derived from the keyword classifier over his current + recent messages.
+        Her explicitness MIRRORS his — she follows his register instead of
+        railroading every conversation into sex."""
+        recent = [m["content"] for m in stm if m["role"] == "user"][-6:]
+        if current_text is None and recent:
+            current_text = recent[-1]
+        if current_text and classify_fast(current_text) == "nsfw":
+            return "high"
+        if any(classify_fast(m) == "nsfw" for m in recent):
+            return "medium"  # the ember: he was hot recently but has cooled off
+        return "low"
+
+    # Temperature by mood: hotter when she's worked up, tighter when she's
+    # firing back (sharp, less rambly). None-mood defaults to a lively 0.9.
+    _TEMP_BY_MOOD = {
+        "aroused": 1.0,
+        "bratty": 0.7,
+        "offended": 0.7,
+        "irritated": 0.75,
+        "jealous": 0.85,
+    }
+    _TEMP_DEFAULT = 0.9
+    _TEMP_CARDS = 0.95
+
+    @classmethod
+    def _temperature_for_mood(cls, mood: dict | None) -> float:
+        return cls._TEMP_BY_MOOD.get((mood or {}).get("mood"), cls._TEMP_DEFAULT)
+
+    async def _generate_with_fallback(
+        self, provider: LLMProvider, prompt_messages: list[dict],
+        temperature: float | None = None,
+    ) -> str:
         """Generate a sexting reply, hardened against hangs and silent refusals.
 
         Grok is the primary generator. We fall back to the dedicated Gemini 2.5
@@ -245,7 +298,8 @@ class ChatEngine:
         text = ""
         try:
             text = await asyncio.wait_for(
-                provider.generate(prompt_messages), timeout=LLM_TIMEOUT_SECONDS
+                provider.generate(prompt_messages, temperature=temperature),
+                timeout=LLM_TIMEOUT_SECONDS,
             )
         except Exception as e:
             logger.warning("Primary (Grok) generation failed/timed out: %s", e)
@@ -256,7 +310,8 @@ class ChatEngine:
         logger.warning("Primary returned empty/refused — falling back to Gemini")
         try:
             text = await asyncio.wait_for(
-                self.fallback_provider.generate(prompt_messages), timeout=LLM_TIMEOUT_SECONDS
+                self.fallback_provider.generate(prompt_messages, temperature=temperature),
+                timeout=LLM_TIMEOUT_SECONDS,
             )
         except Exception as e2:
             logger.error("Fallback (Gemini) generation also failed: %s", e2)
@@ -273,6 +328,8 @@ class ChatEngine:
         self._pending.pop(user_id, None)
         self._last_activity.pop(user_id, None)
         self._processing_lock.pop(user_id, None)
+        self._pinned_scene.pop(user_id, None)
+        clear_mood_state(user_id)
 
     async def suggest_reply(self, user_id: int, mode: str = "sexting") -> str:
         """
@@ -346,15 +403,38 @@ class ChatEngine:
         facts_text = format_facts_for_prompt(user_facts)
         user_name = await get_user_name(user_id)
 
+        # Mirror his register even in the double-text: if he was casual, a
+        # filthy nudge out of nowhere reads as railroading.
+        heat = self._conversation_heat(stm)
+        if heat == "low":
+            spark = (
+                "or toss him something playful from your day or evening — fun, warm, "
+                "teasing at most, NOT sexual (he was keeping it casual)"
+            )
+        else:
+            spark = (
+                "or hit him with a filthy little thought or fantasy that just crossed "
+                "your mind"
+            )
         hint = (
             "He's gone quiet for a few minutes. Double-text him ONCE, the way a real "
-            "shameless girl does when someone's still on her mind — pick up a SPECIFIC thread "
-            "from what you two were just saying, or send him a filthy little thought or a nude "
-            "description that just crossed your mind. Make it feel spontaneous and desperate, "
+            "girl does when someone's still on her mind — pick up a SPECIFIC thread "
+            f"from what you two were just saying, {spark}. Make it feel spontaneous, "
             "never needy. ONE short line only. Do NOT ask generic filler ('what are you "
             "thinking', 'are you there', 'still there?'), do NOT recap, and do NOT complain "
             "about waiting or being ignored."
         )
+
+        # Open loops: unresolved threads she remembers (a story she promised,
+        # something he was in the middle of telling her) beat generic filth —
+        # a real girl circles back to the thing that was left hanging.
+        threads = await get_recent_by_category(user_id, ["thread"], limit=2, mode=mode)
+        if threads:
+            bullets = "\n".join(f"- {t['content']}" for t in threads)
+            hint += (
+                "\nIf one of these open threads fits, pick it back up instead — "
+                f"like it just crossed your mind:\n{bullets}"
+            )
 
         prompt_messages = await build_prompt(
             active_persona, [], stm,
@@ -364,6 +444,7 @@ class ChatEngine:
             facts_text=facts_text,
             mood=mood,
             already_greeted=True,
+            heat=heat,
         )
 
         # Reassemble so the message list starts AND ends with a user turn
@@ -467,11 +548,11 @@ class ChatEngine:
         final_messages = [system_msg] + turns
 
         try:
-            response_text = await self.nsfw_provider.generate(final_messages)
+            response_text = await self.nsfw_provider.generate(final_messages, temperature=self._TEMP_CARDS)
         except Exception as e:
             logger.warning("Dynamic fantasy (Grok) failed: %s — falling back to Gemini", e)
             try:
-                response_text = await self.fallback_provider.generate(final_messages)
+                response_text = await self.fallback_provider.generate(final_messages, temperature=self._TEMP_CARDS)
             except Exception as e2:
                 logger.error("Dynamic fantasy fallback also failed: %s", e2)
                 return ChatResponse()
@@ -480,7 +561,8 @@ class ChatEngine:
             return ChatResponse()
 
         paras = [self._card_lead_in("fantasy")] + self._repack_to_n(response_text, 3)
-        await add_message(user_id, "assistant", "\n".join(paras), mode=mode)
+        # Tagged as fiction so the summarizer never records it as a real event.
+        await add_message(user_id, "assistant", "\n".join(paras), mode=mode, tag="fantasy_card")
         await _record_fantasy_theme(user_id, _fantasy_theme(response_text))
         logger.info(
             "Fantasy generated (dynamic) for user %d — location=%s",
@@ -519,7 +601,8 @@ class ChatEngine:
             if not paras:
                 paras = self._repack_to_n(item["text"], 3)
             paras = [self._card_lead_in(kind)] + paras + [self._story_reciprocity_nudge()]
-            await add_message(user_id, "assistant", "\n".join(paras), mode=mode)
+            # Tagged as fiction so the summarizer never records it as a real event.
+            await add_message(user_id, "assistant", "\n".join(paras), mode=mode, tag="story_card")
             await mark_shared(user_id, kind, item["id"])
             logger.info("Card story '%s' delivered verbatim to user %d", item["id"], user_id)
             return ChatResponse(messages=paras)
@@ -567,11 +650,11 @@ class ChatEngine:
         final_messages = [system_msg] + turns
 
         try:
-            response_text = await self.nsfw_provider.generate(final_messages)
+            response_text = await self.nsfw_provider.generate(final_messages, temperature=self._TEMP_CARDS)
         except Exception as e:
             logger.warning("Card (Grok) failed: %s — falling back to Gemini", e)
             try:
-                response_text = await self.fallback_provider.generate(final_messages)
+                response_text = await self.fallback_provider.generate(final_messages, temperature=self._TEMP_CARDS)
             except Exception as e2:
                 logger.error("Card fallback also failed: %s", e2)
                 return ChatResponse()
@@ -582,7 +665,7 @@ class ChatEngine:
         logger.info("Card story improvised (library empty) for user %d", user_id)
         # Stories are delivered as 3 paced bubbles, closed by a reciprocity nudge.
         messages = self._repack_to_n(response_text, 3) + [self._story_reciprocity_nudge()]
-        await add_message(user_id, "assistant", "\n".join(messages), mode=mode)
+        await add_message(user_id, "assistant", "\n".join(messages), mode=mode, tag="story_card")
         return ChatResponse(messages=messages)
 
     # ------------------------------------------------------------------
@@ -609,6 +692,49 @@ class ChatEngine:
         if prev_state and prev_state["last_message_at"]:
             gap = time.time() - prev_state["last_message_at"]
             last_seen_note = _format_last_seen(gap)
+            if last_seen_note:
+                # He's coming back after a real gap — a girl who remembers asks
+                # how the thing he mentioned went. Cheap SQL, no embeddings.
+                recents = await get_recent_by_category(
+                    user_id, ["event", "thread"], limit=2, mode=mode
+                )
+                if recents:
+                    bullets = "\n".join(f"- {r['content']}" for r in recents)
+                    last_seen_note += (
+                        "\nYou remember these from before — if one fits, ask him "
+                        "how it went (ONE natural follow-up, not an interview):\n"
+                        f"{bullets}"
+                    )
+
+        # Tyler arc: a slow background storyline advanced by ACTIVE chat days
+        # (distinct days he actually messaged) — her life visibly moves every
+        # time he comes back on a new day. A freshly-unlocked event she TELLS
+        # him about once, like a life update; after that it's background only.
+        arc_note = None
+        active_days = (prev_state["active_days"] if prev_state else 0) or 0
+        arc_days = max(0, active_days - 1)  # day 1 of chatting == arc day 0
+        arc_event = get_arc_event(arc_days)
+        if arc_event:
+            told_arc_id = prev_state["last_arc_id"] if prev_state else None
+            # The day-0 baseline is the status quo, not news — background only.
+            # Real events (arc_days >= 1) imply a second chat day, so the
+            # engagement row exists and set_last_arc_id can persist the mark.
+            is_news = arc_days >= 1 and arc_event["id"] != told_arc_id
+            if is_news:
+                arc_note = (
+                    "LIFE UPDATE — this JUST happened in your life and you haven't told "
+                    "him yet. Work it into THIS conversation naturally, once — like a "
+                    "girl bursting to tell him — then let it go: "
+                    f"{arc_event['text']}"
+                )
+                await set_last_arc_id(user_id, arc_event["id"])
+            else:
+                arc_note = (
+                    "ONGOING WITH TYLER (background truth you've already told him about. "
+                    "It colors your mood but it is NOT a talking point — reference it "
+                    "only if he brings it up or it genuinely fits; otherwise stay off "
+                    f"Tyler entirely): {arc_event['text']}"
+                )
 
         stm = await get_recent_messages(user_id, STM_MAX_TURNS, mode=mode)
         # She opens the conversation first, so once there's been any prior
@@ -633,11 +759,34 @@ class ChatEngine:
         repeated = len(recent_user) >= 2 and recent_user[-1] == recent_user[-2]
         ai_question = is_ai_question(text)
 
-        # Mood is derived instantly from the current message — no LLM, no lag.
-        # AI-probing -> offended; spam -> irritated.
+        # Mood is derived from the current message + lingering state (inertia) —
+        # no LLM, no lag. AI-probing -> offended; spam -> irritated.
+        current_period = get_time_period()
         mood = mood_for_message(
-            text, classification, get_time_period(), repeated=repeated, ai_question=ai_question
+            user_id, text, classification, current_period,
+            repeated=repeated, ai_question=ai_question,
         )
+
+        # How sexual HE is being — her register mirrors his (low: playful,
+        # no unprompted filth; medium: suggestive; high: full throttle).
+        heat = self._conversation_heat(stm, text)
+
+        # Scene pinning: if the time-of-day scene changed since her last reply
+        # in THIS conversation, she must announce the move instead of silently
+        # teleporting. A long gap (>1h) means a new session — new scene, no note.
+        scene_hint = None
+        now_ts = time.time()
+        pinned = self._pinned_scene.get(user_id)
+        if pinned and now_ts - pinned[1] > 3600:
+            pinned = None
+        if pinned and pinned[0] != current_period:
+            scene_hint = (
+                f"SCENE CHANGE: earlier in this conversation you were {describe_period(pinned[0])}. "
+                f"Right now you're {describe_period(current_period)}. In THIS reply, mention the "
+                "move naturally in passing (the way a real girl texts 'ok just got to the bar') "
+                "before continuing the thread — do NOT restart the conversation or re-greet him."
+            )
+        self._pinned_scene[user_id] = (current_period, now_ts)
 
         # Mia is always fully open — everything runs through the NSFW
         # provider with the open persona.
@@ -684,8 +833,8 @@ class ChatEngine:
                 "(a landscape, an object, a meme) may you tease lightly and ask for one of him. "
                 "Send EXACTLY TWO chat bubbles, each on its own line. Bubble 1: enjoy the photo "
                 "and compliment him specifically and dirty. Bubble 2: say something flirty that keeps "
-                "the conversation going. Do NOT offer to send a photo back — you already send nudes "
-                "unprompted, so if anything, tell him you're sending him one back right now."
+                "the conversation going. Do NOT offer to send a photo back and do NOT claim you're "
+                "sending one — keep it in words: tell him what seeing him makes you want to do."
             )
 
         # Build and generate
@@ -699,16 +848,21 @@ class ChatEngine:
             last_seen_note=last_seen_note,
             already_greeted=already_greeted,
             photo_hint=photo_hint,
+            scene_hint=scene_hint,
+            arc_note=arc_note,
+            heat=heat,
         )
 
-        response_text = await self._generate_with_fallback(provider, prompt_messages)
+        response_text = await self._generate_with_fallback(
+            provider, prompt_messages, temperature=self._temperature_for_mood(mood)
+        )
         if not response_text or not response_text.strip():
             # Never dead-end the conversation. A hard content-policy refusal from
             # Grok often comes back as EMPTY content (not an exception), and the
             # Gemini fallback may also refuse — in that case reply with a soft
             # in-character line instead of going silent (the old behaviour left
             # the user with the typing indicator vanishing and no message).
-            response_text = self._graceful_deflection()
+            response_text = self._graceful_deflection(heat)
 
         response_parts = None
         if is_user_photo:
@@ -797,6 +951,11 @@ class ChatEngine:
 
         if vary and text.strip():
             target = random.choices([1, 2, 3], weights=ChatEngine._BUBBLE_COUNT_WEIGHTS)[0]
+            # A long reply must never get crammed into fewer bubbles than its
+            # length warrants (picking target=1 for a wall of text made one
+            # giant bubble) — raise the target to ~160 chars per bubble.
+            min_needed = min(ChatEngine.MAX_BUBBLES, (len(text.strip()) + 159) // 160)
+            target = max(target, min_needed, 1)
             packed = ChatEngine._repack_to_n(text, target)
             if packed:
                 return packed[: ChatEngine.MAX_BUBBLES]
@@ -841,7 +1000,7 @@ class ChatEngine:
     # Closes every story she tells — turns it back on him so he opens up too.
     _STORY_RECIPROCITY_NUDGES = [
         "okay... now it's your turn. tell me something you've never told anyone",
-        "i showed you mine � now show me yours",
+        "i showed you mine — now show me yours",
         "your turn babe — what's the dirtiest thing you've actually done?",
         "now i want one of yours. don't be shy with me",
         "mm... your turn now. tell me a little secret of yours",
@@ -849,7 +1008,7 @@ class ChatEngine:
     ]
     # Said once she's told him every authored story (and on every later tap).
     _STORY_EXHAUSTED = [
-        "lol that's basically all my dirty little secrets, babe...\ni've told you everything. now i want to hear yours �",
+        "lol that's basically all my dirty little secrets, babe...\ni've told you everything. now i want to hear yours 😈",
         "okay, you've heard every one of mine now... every slutty thing i've done.\nyour turn — tell me one of yours, don't hold back",
         "that's me completely out of stories... i'm all out.\nnow i want yours 😈 tell me something filthy you've done",
     ]
@@ -879,6 +1038,16 @@ class ChatEngine:
         """
         text = text.replace("\u2014", "-").replace("\u2013", "-").strip()
         segments = [p.strip() for p in text.split("\n") if p.strip()]
+        # Break up any single oversized line into sentences first, so an uneven
+        # model reply ("short line\n400-char line") can't leave a wall-of-text
+        # bubble that even grouping can't fix.
+        expanded: list[str] = []
+        for seg in segments:
+            if len(seg) > 220:
+                expanded.extend(s.strip() for s in re.split(r"(?<=[.!?\u2026])\s+", seg) if s.strip())
+            else:
+                expanded.append(seg)
+        segments = expanded
         # If we don't have enough line-segments, fall back to sentence splitting.
         if len(segments) < n:
             joined = " ".join(segments) if segments else text

@@ -20,6 +20,9 @@ PERSONA_FILE_SEXTING = BASE_DIR / os.getenv("SINGLE_PERSONA_FILE", "personas/mia
 # ship in git (unlike the gitignored content/).
 FANTASIES_FILE = BASE_DIR / os.getenv("FANTASIES_FILE", "library/fantasies.yaml")
 STORIES_FILE = BASE_DIR / os.getenv("STORIES_FILE", "library/stories.yaml")
+# Slow background storyline with Tyler — advances by real days since the user's
+# first message (see library/tyler_arc.yaml).
+TYLER_ARC_FILE = BASE_DIR / os.getenv("TYLER_ARC_FILE", "library/tyler_arc.yaml")
 
 # Where photos the USER uploads are stored on disk and served from (so they
 # survive a page reload / history refresh). Lives under data/ (gitignored).

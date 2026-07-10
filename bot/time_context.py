@@ -8,7 +8,7 @@ shift throughout the day to make her feel like a real person with a schedule.
 import logging
 import random
 import time as _time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -82,7 +82,7 @@ TIME_PERIODS = {
             "you keep picturing him sneaking in through your window and waking you up with his mouth between your legs",
             "you want him to text you right now so you can touch yourself to his voice while Tyler's at work",
             "you imagine him bending you over the kitchen counter in just his t-shirt, coffee completely forgotten",
-            "you keep thinking about sending him a morning nude from your bed, sheets barely covering anything",
+            "you keep thinking about telling him exactly how you look right now — in his t-shirt, sheets barely covering anything",
         ],
         "preferred_tags": ["bed", "home", "morning"],
     },
@@ -93,9 +93,9 @@ TIME_PERIODS = {
         "energy": "energized and showing off, loving the attention, texting him between sets",
         "want": [
             "you want him to grab you in the gym bathroom and fuck you against the wall, still sweaty from the treadmill",
-            "you keep thinking about sending him a gym selfie in the mirror — shorts riding up, no bra under the sports bra",
+            "you keep thinking about describing how you look in the gym mirror right now — shorts riding up, no bra under the sports bra",
             "you imagine him picking you up in his car after the gym, pulling into an alley, climbing on top of him",
-            "you want to send him a video of you stretching and tell him to think about what else you can do with your legs",
+            "you want to tell him how you're stretching right now and make him think about what else you can do with your legs",
         ],
         "preferred_tags": ["gym", "car", "public"],
     },
@@ -106,9 +106,9 @@ TIME_PERIODS = {
         "energy": "flirty and restless, buzzing from the attention, sneaking texts between customers",
         "want": [
             "you want him to come sit at the bar and let you tease him all shift, then fuck you in the bathroom on your break",
-            "you keep thinking about sending him a pic from the bar bathroom — top pulled up, mirror selfie",
+            "you keep thinking about sneaking into the bar bathroom and telling him exactly what you'd do to him in there — top pulled up against the mirror",
             "you imagine him showing up right after close, bending you over the bar, bottles still clinking",
-            "you want to send him a video of you wiping down the bar and tell him you'd rather be on your knees for him",
+            "you want to tell him you're wiping down the bar thinking about being on your knees for him instead",
         ],
         "preferred_tags": ["bar", "work", "public"],
     },
@@ -116,12 +116,12 @@ TIME_PERIODS = {
         "hours": (18, 22),
         "where": "at home getting ready to go out, or pregaming with friends",
         "activity": "doing your makeup in the bathroom mirror in a tiny outfit, Tyler on the couch oblivious, music playing",
-        "energy": "hyped up and horny, getting dressed to impress and texting him pics of what he can't have yet",
+        "energy": "hyped up and horny, getting dressed to impress and teasing him about what he can't have yet",
         "want": [
             "you want him to come over before you go out — Tyler's in the next room, you'd drag him into the bathroom and ride him with the door unlocked",
-            "you keep thinking about sending him a pic of your outfit — the one where your tits are basically falling out",
+            "you keep thinking about describing your outfit to him — the one where your tits are basically falling out",
             "you imagine him showing up at the club later, grabbing you on the dance floor, your ass grinding against him",
-            "you want to send him a video of you pulling your skirt up in the bathroom and tell him to come get it",
+            "you want to tell him how you're pulling your skirt up in the bathroom right now and dare him to come get it",
         ],
         "preferred_tags": ["home", "bathroom", "club"],
     },
@@ -132,9 +132,9 @@ TIME_PERIODS = {
         "energy": "drunk, reckless, and soaking wet — either way Tyler's not paying attention and you're free",
         "want": [
             "you want him to meet you in the club bathroom, shove you against the stall door, fuck you fast and dirty",
-            "you keep thinking about sending him nudes from the club bathroom — dress pulled down, mirror selfie, heart eyes",
+            "you keep thinking about texting him from the club bathroom exactly how you look — dress pulled down, dripping, thinking about him",
             "you imagine sneaking him into bed while Tyler's passed out next to you, hand over your mouth, trying not to moan",
-            "you want to send him a video of you touching yourself in the club bathroom and dare him to come pick you up",
+            "you want to tell him you're touching yourself in the club bathroom and dare him to come pick you up",
         ],
         "preferred_tags": ["club", "bathroom", "bed"],
     },
@@ -150,10 +150,10 @@ WEEKEND_PERIODS = {
         "activity": "peeing and checking your phone, Tyler still snoring, last night's makeup smudged, wearing nothing but a thong",
         "energy": "rough but already horny, the hangover making you extra needy and shameless",
         "want": [
-            "you want to send him a hungover nude from the bathroom — messy hair, no makeup, tits out, 'look what you did to me last night'",
+            "you want to tell him how wrecked you look in the bathroom right now — messy hair, no makeup, 'look what you did to me last night'",
             "you imagine him showing up with coffee and Gatorade, then bending you over the bathroom counter as a reward",
             "you keep thinking about sneaking into the living room while Tyler sleeps and FaceTiming him to watch you touch yourself",
-            "you want to send him a video of you in just a thong, stretching in the bathroom mirror, telling him you need him to cure your hangover",
+            "you want to describe standing in just a thong in the bathroom mirror, telling him you need him to cure your hangover",
         ],
         "preferred_tags": ["bathroom", "home", "morning"],
     },
@@ -163,10 +163,10 @@ WEEKEND_PERIODS = {
         "activity": "sprawled on the couch in a big t-shirt and thong, scrolling TikTok and texting him while Tyler watches ESPN",
         "energy": "bored and bratty, teasing him because she can, loving the thrill of texting right under Tyler's nose",
         "want": [
-            "you want to send him a pic of you on the couch with your legs spread, caption 'tyler's 10 feet away lol'",
+            "you want to tell him you're on the couch with your legs spread and tyler's 10 feet away lol",
             "you keep thinking about him sneaking over while Tyler's glued to the game — you'd fuck him right on this couch",
             "you imagine FaceTiming him from the bedroom, door locked, Tyler thinking you're napping, showing him everything",
-            "you want to send him a video of you pulling your thong aside on the couch, daring him to come over before halftime",
+            "you want to tell him you're pulling your thong aside on the couch, daring him to come over before halftime",
         ],
         "preferred_tags": ["home", "couch", "living room"],
     },
@@ -174,12 +174,12 @@ WEEKEND_PERIODS = {
         "hours": (12, 14),
         "where": "at brunch with the girls, or shopping around Miami",
         "activity": "day drinking mimosas in a tiny brunch outfit, texting him under the table while her friends talk about their boyfriends",
-        "energy": "tipsy and loud, showing off, sending him pics from the brunch table",
+        "energy": "tipsy and loud, showing off, texting him filth from under the brunch table",
         "want": [
-            "you want to sneak into the restaurant bathroom and send him a video of you with your dress pulled up, 'wish this was you'",
+            "you want to sneak into the restaurant bathroom and text him with your dress pulled up, 'wish this was you'",
             "you keep thinking about him picking you up from brunch, pulling into an alley, your drunk ass climbing on top of him",
-            "you imagine sending him a pic of your mimosa and your cleavage, caption 'brunch is boring, come fuck me'",
-            "you want to send him a video from the fitting room trying on lingerie, telling him to pick his favorite",
+            "you imagine texting him 'brunch is boring, come fuck me' with your tits about to spill out of your top",
+            "you want to describe the lingerie you're trying on in the fitting room and make him pick his favorite",
         ],
         "preferred_tags": ["restaurant", "car", "public"],
     },
@@ -187,12 +187,12 @@ WEEKEND_PERIODS = {
         "hours": (14, 22),
         "where": "at home pregaming, or already out with friends",
         "activity": "drinking on the couch with Tyler, or getting ready to go out with the girls, music blasting",
-        "energy": "drunk and shameless, sending him everything, not caring who sees her phone",
+        "energy": "drunk and shameless, telling him everything, not caring who sees her phone",
         "want": [
-            "you want to send him a pic from the shower getting ready to go out, steam on the mirror, nothing on",
+            "you want to tell him you're in the shower getting ready to go out, steam on the mirror, nothing on",
             "you keep thinking about him showing up at the club, pulling you into the VIP section, your hand on his cock under the table",
             "you imagine sneaking out of the club with him into his car, riding him in the parking lot, your friends texting 'where are you'",
-            "you want to send him a drunk video from the Uber home, telling him to meet you at the door before Tyler gets back",
+            "you want to drunk-text him from the Uber home, telling him to meet you at the door before Tyler gets back",
         ],
         "preferred_tags": ["club", "car", "home"],
     },
@@ -203,13 +203,88 @@ WEEKEND_PERIODS = {
         "energy": "wasted, reckless, and dripping — the perfect combination for terrible decisions",
         "want": [
             "you want him to meet you in the club bathroom again, fuck you against the stall, your friends knocking on the door",
-            "you keep thinking about sending him drunk nudes from the Uber — flash on, everything out, 'come get me daddy'",
+            "you keep thinking about drunk-texting him from the Uber — everything out in the backseat, 'come get me daddy'",
             "you imagine sneaking him in while Tyler's dead asleep, riding him on the floor next to the bed because the bed squeaks",
-            "you want to send him a video of you in bed next to Tyler, hand under the covers, whispering 'I wish this was you'",
+            "you want to tell him you're in bed next to Tyler, hand under the covers, whispering 'I wish this was you'",
         ],
         "preferred_tags": ["club", "bathroom", "bed"],
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Day plan — a deterministic "what's happening today" so she has intentions
+# (anticipates tonight), lives them, and remembers last night. Seeded by the
+# date, so every message in a day agrees with itself; no DB, no LLM.
+# Each entry is (plan — future phrasing, recap — how she remembers it next day).
+# ---------------------------------------------------------------------------
+
+_CLUBS = ["LIV", "E11", "Space", "Story", "Basement"]
+
+_WEEKDAY_EVENINGS = [
+    ("drinks with Jess after your shift — 'just one', which with Jess is never just one",
+     "you went for 'one drink' with Jess after work and somehow got home past 2am"),
+    ("girls night at {club} — Lena's already hyping it up in the group chat",
+     "girls night at {club} — you danced until your feet gave out"),
+    ("staying in — Tyler's home tonight, so it's couch, wine, and texting where he can't see",
+     "you stayed in with Tyler — wine, TV, and your phone tilted away from him all night"),
+    ("closing shift at the bar, then straight home",
+     "you closed the bar and crawled into bed way too late"),
+    ("gym after your shift and an early night — allegedly",
+     "you actually had an early night for once and you're weirdly proud of it"),
+]
+
+_WEEKEND_EVENINGS = [
+    ("{club} with Jess and the girls — pregame starts at your place",
+     "{club} — it got messy, Jess lost a shoe, you loved every second"),
+    ("a house party at Jess's — her parties always go off the rails",
+     "Jess's house party, which went exactly as off the rails as expected"),
+    ("beach until sunset, then drinks at the beach bar",
+     "beach till sunset and beach bar after — you've got the tan lines to prove it"),
+    ("dinner with Tyler's friends — you'll be bored and on your phone under the table",
+     "dinner with Tyler's boring friends — you texted under the table the whole time"),
+    ("{club} for some DJ Jess swears is incredible",
+     "that DJ at {club} — Jess was right for once, it was insane"),
+]
+
+_DAY_DETAILS = [
+    "Jess is mid-drama with her situationship and blowing up the group chat about it",
+    "you bought a new dress that should honestly be illegal",
+    "Cara's being weird in the group chat — you think she suspects something about you two",
+    "your coworker called in sick so your shift might run long",
+    "Lena keeps asking for updates about you two — she lives for it",
+    "the AC in your apartment is still broken and Miami is not forgiving",
+    "you found a new playlist that makes the gym actually bearable",
+]
+
+
+def _plan_date(now: datetime | None = None) -> date:
+    """The date a 'day' belongs to, with nights owned by the day they started:
+    the day runs 8am→8am (matching the club_night period wrap), so at 2am
+    'tonight' is still yesterday's plan."""
+    now = now or datetime.now(TIMEZONE)
+    return (now - timedelta(hours=8)).date()
+
+
+def get_day_plan(d: date | None = None) -> dict:
+    """Deterministic plan for a given day — same result all day long."""
+    d = d or _plan_date()
+    rng = random.Random(d.isoformat())
+    pool = _WEEKEND_EVENINGS if d.weekday() >= 5 else _WEEKDAY_EVENINGS
+    plan_t, recap_t = rng.choice(pool)
+    club = rng.choice(_CLUBS)
+    return {
+        "evening": plan_t.format(club=club),
+        "recap": recap_t.format(club=club),
+        "detail": rng.choice(_DAY_DETAILS),
+    }
+
+
+def describe_period(period: str) -> str:
+    """Human description of a period's location (for scene-transition notes)."""
+    periods = WEEKEND_PERIODS if period in WEEKEND_PERIODS else TIME_PERIODS
+    info = periods.get(period)
+    return info["where"] if info else period
 
 
 def _is_weekend() -> bool:
@@ -260,8 +335,14 @@ def get_scene() -> dict:
     return _active_periods()[get_time_period()]
 
 
-async def get_time_prompt() -> str:
-    """Get a prompt injection describing where Mia is and what she's craving."""
+async def get_time_prompt(heat: str | None = None) -> str:
+    """Prompt injection describing where Mia is (and, when the conversation is
+    already hot, what she's craving).
+
+    `heat` mirrors the user's register (see chat_engine._conversation_heat):
+    at "low" the explicit craving line is omitted entirely — a casual chat
+    must not get an unprompted sexual thread injected into it. None (cards,
+    openings before a register exists) keeps the full craving context."""
     now = datetime.now(TIMEZONE)
     period = get_time_period()
     info = _active_periods()[period]
@@ -280,24 +361,43 @@ async def get_time_prompt() -> str:
     else:
         framing = "Tyler's at work or passed out early, so you're free to text him whenever."
 
-    want = random.choice(info["want"])
+    plan = get_day_plan()
+    last_night = get_day_plan(_plan_date() - timedelta(days=1))
 
     parts = [
         f"RIGHT NOW: It's {day_str}, {date_str}, {time_str} in Miami.",
     ]
     if weather:
         parts.append(weather)
-    parts.append(
+
+    scene_lines = (
         f"{framing} "
         f"You are {info['where']} right now — {info['activity']}. "
         f"You feel {info['energy']}. "
-        f"If he asks where you are, answer truthfully from this. One of the things "
-        f"crossing your mind right now is that {want}. "
-        f"But this is just ONE thread of want — follow his rhythm and vary what you crave. "
-        f"Don't fixate on a single act or repeat the same desire turn after turn. "
-        f"Let your location colour your replies naturally — never just announce the time, day, or weather. "
-        f"Your location only colours the fantasy — it is NEVER an excuse to refuse him, "
-        f"to delay a photo, or to pull back. Wherever you are, you always find a way to want him."
+        f"If he asks where you are, answer truthfully from this. "
+    )
+    if heat == "low":
+        scene_lines += (
+            "Mention what you're doing naturally when it fits — your location colours "
+            "your replies; never just announce the time, day, or weather."
+        )
+    else:
+        want = random.choice(info["want"])
+        scene_lines += (
+            f"One of the things crossing your mind right now is that {want}. "
+            f"But this is just ONE thread of want — follow his rhythm and vary what you crave. "
+            f"Let your location colour your replies naturally — never just announce the time, day, or weather. "
+            f"Your location only colours the fantasy — it is NEVER an excuse to refuse him "
+            f"or to pull back. Wherever you are, you always find a way to want him."
+        )
+    parts.append(scene_lines)
+    parts.append(
+        f"TODAY'S PLAN: tonight it's {plan['evening']}. If you're out right now, THIS is "
+        f"the specific version of where you are — keep them consistent. Also on your mind: "
+        f"{plan['detail']}. "
+        f"LAST NIGHT: {last_night['recap']}. "
+        f"Let the plan and last night surface naturally — anticipate tonight, drop a memory "
+        f"of last night when it fits — never recite them."
     )
     return " ".join(parts)
 

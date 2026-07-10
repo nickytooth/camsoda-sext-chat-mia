@@ -12,7 +12,7 @@ import random
 import logging
 import yaml
 
-from bot.config import FANTASIES_FILE, STORIES_FILE
+from bot.config import FANTASIES_FILE, STORIES_FILE, TYLER_ARC_FILE
 from bot.memory.db import get_connection
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,47 @@ def library_size(kind: str) -> int:
     """How many authored items exist for this kind. Lets callers tell an
     EXHAUSTED rotation (all shared) apart from an EMPTY/missing library file."""
     return len(_load(kind))
+
+
+# ---------------------------------------------------------------------------
+# Tyler arc — slow background storyline, advanced by ACTIVE chat days
+# ---------------------------------------------------------------------------
+
+_arc_cache: dict = {"mtime": None, "events": []}
+
+
+def get_arc_event(chat_days: float) -> dict | None:
+    """The current Tyler-arc event: the LAST event whose `after_chat_days` has
+    passed (events are cumulative). Returns {id, text} or None when the file is
+    missing/empty. Pure derive from the day count — no DB writes here; the
+    caller tracks which event she has already told him about."""
+    try:
+        mtime = os.path.getmtime(TYLER_ARC_FILE)
+    except OSError:
+        return None
+    if _arc_cache["mtime"] != mtime:
+        try:
+            with open(TYLER_ARC_FILE, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            events = [
+                e for e in (data.get("events") or [])
+                if e.get("id") and e.get("text") and e.get("after_chat_days") is not None
+            ]
+            events.sort(key=lambda e: e["after_chat_days"])
+        except Exception as e:
+            logger.warning("Failed to load Tyler arc from %s: %s", TYLER_ARC_FILE, e)
+            events = []
+        _arc_cache.update(mtime=mtime, events=events)
+
+    current = None
+    for event in _arc_cache["events"]:
+        if chat_days >= event["after_chat_days"]:
+            current = event
+        else:
+            break
+    if not current:
+        return None
+    return {"id": current["id"], "text": current["text"].strip()}
 
 
 async def _shared_ids(user_id: int, kind: str) -> set[str]:

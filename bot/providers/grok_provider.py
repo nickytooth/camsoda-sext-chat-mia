@@ -24,13 +24,15 @@ def _get_client() -> AsyncOpenAI:
 
 
 class GrokProvider(LLMProvider):
-    async def generate(self, messages: list[dict]) -> str:
+    async def generate(self, messages: list[dict], temperature: float | None = None) -> str:
         client = _get_client()
+        kwargs = {"temperature": temperature} if temperature is not None else {}
         response = await client.chat.completions.create(
             model=XAI_MODEL,
             messages=messages,
             max_tokens=1024,
             timeout=LLM_TIMEOUT_SECONDS,
+            **kwargs,
         )
         return response.choices[0].message.content
 

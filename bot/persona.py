@@ -14,6 +14,12 @@ class Persona:
         self.opening_lines = data.get("opening_lines", [])
         self.boundaries = data.get("boundaries", [])
         self.dynamic = data.get("dynamic", "")
+        # Structured "alive" layers — concrete, non-redundant texture the model
+        # can draw on. Rendered as short, focused sections (not prose dumps).
+        self.quirks = data.get("quirks", [])
+        self.kinks = data.get("kinks", [])
+        self.daily_life = data.get("daily_life", [])
+        self.friends = data.get("friends", [])
 
     @property
     def name(self) -> str:
@@ -48,6 +54,10 @@ class Persona:
         if scent := self.general.get("scent"):
             sections.append(f"You smell like: {scent}")
 
+        # Core personality — one sharp line about her drive
+        if personality := self.general.get("personality"):
+            sections.append(f"Core personality: {personality.strip()}")
+
         # Communication style
         if style := self.instructions.get("communication_style"):
             sections.append(f"Communication style:\n{style.strip()}")
@@ -61,9 +71,40 @@ class Persona:
         if pet_names := self.instructions.get("pet_names"):
             sections.append(f"Pet names you use: {', '.join(pet_names)}")
 
+        # Quirks / mannerisms — physical tics she can act out in texting
+        if self.quirks:
+            quirks_text = "\n".join(f"- {q}" for q in self.quirks)
+            sections.append(
+                "Your mannerisms (act these out naturally, don't announce them):\n"
+                f"{quirks_text}"
+            )
+
+        # Kinks — one compact line so it informs her without bloating the prompt
+        # or duplicating the fuller SEX section in communication_style.
+        if self.kinks:
+            sections.append(f"What gets you off: {', '.join(self.kinks)}.")
+
         # Background
         if bg := self.context.get("background"):
             sections.append(f"Your background:\n{bg.strip()}")
+
+        # Daily life — concrete "right now" texture she volunteers naturally
+        if self.daily_life:
+            life_text = "\n".join(f"- {d}" for d in self.daily_life)
+            sections.append(
+                "Your life right now (mention these naturally when they fit, "
+                "never recite them as a list):\n"
+                f"{life_text}"
+            )
+
+        # Friends — a recurring cast so her world has consistent people in it
+        if self.friends:
+            friends_text = "\n".join(f"- {f}" for f in self.friends)
+            sections.append(
+                "Your friends (a recurring cast — gossip about them naturally, "
+                "keep their personalities consistent):\n"
+                f"{friends_text}"
+            )
 
         # Character memories
         for mem_type in ("sexual", "non_sexual"):
