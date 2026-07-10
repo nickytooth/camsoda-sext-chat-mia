@@ -114,9 +114,9 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
     that then contradicts the first time-aware reply.
     """
     from bot.time_context import get_time_prompt
-    persona_prompt = engine.persona.to_system_prompt()
-    # heat="low": the conversation hasn't started, so the opening must be a
-    # teasing hook, not explicit — HE is the one who unlocks that register.
+    # Locked register: the conversation hasn't started, so the opening must be
+    # a teasing hook, not explicit — HE is the one who unlocks that register.
+    persona_prompt = engine.persona.to_system_prompt(include_unlocked=False)
     time_prompt = await get_time_prompt(heat="low")
     messages = [
         {

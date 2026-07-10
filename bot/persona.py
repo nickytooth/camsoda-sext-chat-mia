@@ -20,6 +20,9 @@ class Persona:
         self.kinks = data.get("kinks", [])
         self.daily_life = data.get("daily_life", [])
         self.friends = data.get("friends", [])
+        # Unlocked-only layer: rendered solely when the chat is already sexual
+        # (see to_system_prompt(include_unlocked)).
+        self.sex_unlocked = data.get("sex_unlocked", "")
 
     @property
     def name(self) -> str:
@@ -38,7 +41,11 @@ class Persona:
             return random.choice(self.opening_lines)
         return "hey"
 
-    def to_system_prompt(self) -> str:
+    def to_system_prompt(self, include_unlocked: bool = True) -> str:
+        """Render the persona. `include_unlocked=False` (casual chat / the
+        rising bridge / openings) keeps the explicit-only layers — the SEX
+        style block, the kinks line and the sexual memories — OUT of the
+        prompt entirely, so nothing pushes explicitness before HE unlocks it."""
         sections = []
 
         # Identity
@@ -62,6 +69,13 @@ class Persona:
         if style := self.instructions.get("communication_style"):
             sections.append(f"Communication style:\n{style.strip()}")
 
+        # SEX style — unlocked chats only
+        if include_unlocked and self.sex_unlocked:
+            sections.append(
+                "SEX (he's opened that door — all of this is you):\n"
+                f"{self.sex_unlocked.strip()}"
+            )
+
         # Linguistic markers
         if markers := self.instructions.get("key_linguistic_markers"):
             markers_text = "\n".join(f"- {m}" for m in markers)
@@ -79,9 +93,8 @@ class Persona:
                 f"{quirks_text}"
             )
 
-        # Kinks — one compact line so it informs her without bloating the prompt
-        # or duplicating the fuller SEX section in communication_style.
-        if self.kinks:
+        # Kinks — one compact line, unlocked chats only
+        if include_unlocked and self.kinks:
             sections.append(f"What gets you off: {', '.join(self.kinks)}.")
 
         # Background
@@ -106,8 +119,10 @@ class Persona:
                 f"{friends_text}"
             )
 
-        # Character memories
+        # Character memories (the sexual set is unlocked-only)
         for mem_type in ("sexual", "non_sexual"):
+            if mem_type == "sexual" and not include_unlocked:
+                continue
             mems = self.character_memories.get(mem_type, [])
             if mems:
                 label = "sexual" if mem_type == "sexual" else "non-sexual"

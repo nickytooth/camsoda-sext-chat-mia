@@ -104,7 +104,9 @@ async def build_prompt(
     arc_note: str | None = None,
     heat: str | None = None,
 ) -> list[dict]:
-    system_parts = [persona.to_system_prompt()]
+    # The explicit-only persona layers (SEX block, kinks, sexual memories)
+    # render only once the chat is unlocked; None (cards) keeps them in.
+    system_parts = [persona.to_system_prompt(include_unlocked=heat not in ("low", "rising"))]
 
     # User's name
     if user_name:
@@ -159,14 +161,10 @@ async def build_prompt(
             system_parts.append(mood_line)
         # When he's been genuinely insulting, she fires back — crude and sharp.
         # She's not delicate, she doesn't go cold and elegant — she matches his energy.
-        if (mood or {}).get("mood") == "offended":
-            system_parts.append(
-                "HE QUESTIONED IF YOU'RE REAL: you're dismissive and bratty about it. "
-                "Laugh it off, call him dumb, act unimpressed — you're not hurt, you're "
-                "just bored by the question. NEVER admit being anything but a real woman, "
-                "NEVER get defensive or over-explain. Do NOT warm back up until he drops it."
-            )
-        elif heat not in ("low", "rising"):
+        # (The "are you real" deflection lives in MOODS["offended"] alone —
+        # it used to be triplicated here and in a push hint, drowning out
+        # everything else in the prompt.)
+        if (mood or {}).get("mood") != "offended" and heat not in ("low", "rising"):
             # She FOLLOWS his lead, but draws on her own wild past and fantasies
             # to respond richly — and to open a thread when he's gone quiet or is
             # just chatting, rather than always railroading the topic. Skipped

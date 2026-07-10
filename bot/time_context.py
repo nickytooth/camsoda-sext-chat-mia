@@ -373,8 +373,17 @@ async def get_time_prompt(heat: str | None = None) -> str:
     scene_lines = (
         f"{framing} "
         f"You are {info['where']} right now — {info['activity']}. "
-        f"You feel {info['energy']}. "
-        f"If he asks where you are, answer truthfully from this. "
+    )
+    # The scripted "energy" lines lean horny/wet — they only belong in an
+    # already-heated chat. At low/rising the mood line carries the tone.
+    if heat not in ("low", "rising"):
+        scene_lines += f"You feel {info['energy']}. "
+    scene_lines += (
+        "If he asks where you are, answer truthfully from this. "
+        "IMPORTANT: if you've already mentioned where you are, what you're wearing, or "
+        "what you're doing earlier in this conversation, do NOT describe it again — a "
+        "real person never re-announces their outfit or scene. Add a genuinely NEW "
+        "detail or just skip it. "
     )
     if heat in ("low", "rising"):
         # Casual chat and the first-spark bridge both stay free of injected

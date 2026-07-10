@@ -12,13 +12,13 @@ import uuid
 from dataclasses import dataclass, field
 
 from bot.persona import Persona, load_persona
-from bot.memory.stm import add_message, get_recent_messages, count_turns
+from bot.memory.stm import add_message, get_recent_messages
 from bot.memory.ltm import retrieve_relevant, should_retrieve, get_recent_by_category
 from bot.memory.summarizer import maybe_summarize, maybe_compact
 from bot.memory.facts import get_facts, format_facts_for_prompt, get_user_name
 from bot.prompt_builder import build_prompt
 from bot.router import classify_fast
-from bot.engagement import track_message, get_engagement_state, record_reengage
+from bot.engagement import track_message, get_engagement_state, set_last_arc_id
 from bot.mood import mood_for_message, is_ai_question, clear_mood_state
 from bot.content_library import pick_unshared, mark_shared, get_examples, library_size, get_arc_event
 from bot.time_context import get_time_period, get_preferred_tags, get_scene, describe_period
@@ -417,10 +417,10 @@ class ChatEngine:
         # Mirror his register even in the double-text: if he was casual, a
         # filthy nudge out of nowhere reads as railroading.
         heat = self._conversation_heat(stm)
-        if heat == "low":
+        if heat in ("low", "rising"):
             spark = (
                 "or toss him something playful from your day or evening — fun, warm, "
-                "teasing at most, NOT sexual (he was keeping it casual)"
+                "teasing at most, NOT sexual (the chat isn't fully there yet)"
             )
         else:
             spark = (
@@ -717,36 +717,6 @@ class ChatEngine:
                         f"{bullets}"
                     )
 
-        # Tyler arc: a slow background storyline advanced by ACTIVE chat days
-        # (distinct days he actually messaged) — her life visibly moves every
-        # time he comes back on a new day. A freshly-unlocked event she TELLS
-        # him about once, like a life update; after that it's background only.
-        arc_note = None
-        active_days = (prev_state["active_days"] if prev_state else 0) or 0
-        arc_days = max(0, active_days - 1)  # day 1 of chatting == arc day 0
-        arc_event = get_arc_event(arc_days)
-        if arc_event:
-            told_arc_id = prev_state["last_arc_id"] if prev_state else None
-            # The day-0 baseline is the status quo, not news — background only.
-            # Real events (arc_days >= 1) imply a second chat day, so the
-            # engagement row exists and set_last_arc_id can persist the mark.
-            is_news = arc_days >= 1 and arc_event["id"] != told_arc_id
-            if is_news:
-                arc_note = (
-                    "LIFE UPDATE — this JUST happened in your life and you haven't told "
-                    "him yet. Work it into THIS conversation naturally, once — like a "
-                    "girl bursting to tell him — then let it go: "
-                    f"{arc_event['text']}"
-                )
-                await set_last_arc_id(user_id, arc_event["id"])
-            else:
-                arc_note = (
-                    "ONGOING WITH TYLER (background truth you've already told him about. "
-                    "It colors your mood but it is NOT a talking point — reference it "
-                    "only if he brings it up or it genuinely fits; otherwise stay off "
-                    f"Tyler entirely): {arc_event['text']}"
-                )
-
         stm = await get_recent_messages(user_id, STM_MAX_TURNS, mode=mode)
         # She opens the conversation first, so once there's been any prior
         # activity she must continue the thread, not greet again. Derive this
@@ -779,18 +749,56 @@ class ChatEngine:
         )
 
         # How sexual HE is being — her register mirrors his (low: playful,
-        # no unprompted filth; medium: suggestive; high: full throttle).
+        # no unprompted filth; rising: the teasing bridge; high: full throttle).
         heat = self._conversation_heat(stm, text)
+
+        # On the bridge the raw aroused mood ("wet, desperate, saying so") would
+        # fight the rising guidance ("no graphic yet") — swap it for the
+        # composed-but-lit variant. Also drops temperature from 1.0 to default.
+        if heat == "rising" and mood.get("mood") == "aroused":
+            mood = {"mood": "sparked", "intensity": mood.get("intensity", 2)}
+
+        # Tyler arc: a slow background storyline advanced by ACTIVE chat days
+        # (distinct days he actually messaged) — her life visibly moves every
+        # time he comes back on a new day. A freshly-unlocked event she TELLS
+        # him about once, like a life update — but NEVER mid-scene: while the
+        # chat is hot the news waits (untold) for the next calm turn.
+        arc_note = None
+        active_days = (prev_state["active_days"] if prev_state else 0) or 0
+        arc_days = max(0, active_days - 1)  # day 1 of chatting == arc day 0
+        arc_event = get_arc_event(arc_days)
+        if arc_event:
+            told_arc_id = prev_state["last_arc_id"] if prev_state else None
+            # The day-0 baseline is the status quo, not news — background only.
+            # Real events (arc_days >= 1) imply a second chat day, so the
+            # engagement row exists and set_last_arc_id can persist the mark.
+            is_news = arc_days >= 1 and arc_event["id"] != told_arc_id
+            if is_news and heat not in ("rising", "high"):
+                arc_note = (
+                    "LIFE UPDATE — this JUST happened in your life and you haven't told "
+                    "him yet. Work it into THIS conversation naturally, once — like a "
+                    "girl bursting to tell him — then let it go: "
+                    f"{arc_event['text']}"
+                )
+                await set_last_arc_id(user_id, arc_event["id"])
+            else:
+                arc_note = (
+                    "ONGOING WITH TYLER (background truth. It colors your mood but it "
+                    "is NOT a talking point — reference it only if he brings it up or "
+                    f"it genuinely fits; otherwise stay off Tyler entirely): {arc_event['text']}"
+                )
 
         # Scene pinning: if the time-of-day scene changed since her last reply
         # in THIS conversation, she must announce the move instead of silently
         # teleporting. A long gap (>1h) means a new session — new scene, no note.
+        # Mid-scene (heat=high) the move is NOT announced — nothing kills a
+        # scene like travel logistics; the pin still updates silently.
         scene_hint = None
         now_ts = time.time()
         pinned = self._pinned_scene.get(user_id)
         if pinned and now_ts - pinned[1] > 3600:
             pinned = None
-        if pinned and pinned[0] != current_period:
+        if pinned and pinned[0] != current_period and heat != "high":
             scene_hint = (
                 f"SCENE CHANGE: earlier in this conversation you were {describe_period(pinned[0])}. "
                 f"Right now you're {describe_period(current_period)}. In THIS reply, mention the "
@@ -806,21 +814,15 @@ class ChatEngine:
 
         is_user_photo = "[User sent a photo:" in text
 
+        # NOTE: the "are you real" deflection is carried by MOODS["offended"]
+        # alone (mood fires on ai_question) — no extra push hint, it used to be
+        # injected three times over.
         push_hint = None
 
         # LTM
         ltm = []
         if should_retrieve(user_id, text):
             ltm = await retrieve_relevant(user_id, text, mode=mode)
-
-        # AI-identity probing → graceful, in-character deflection.
-        if ai_question:
-            push_hint = (
-                "He's questioning whether you're real or an AI. You're not hurt — you're "
-                "dismissive and bratty about it. Laugh it off, call him dumb, act unimpressed. "
-                "NEVER admit being anything but a real woman, NEVER break character, and "
-                "NEVER get defensive or over-explain. Just brush it off with bratty energy."
-            )
 
         # Facts
         user_facts = await get_facts(user_id)
