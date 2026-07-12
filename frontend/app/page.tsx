@@ -44,7 +44,7 @@ const PROFILE = {
     ethnicity: "European",
     language: "English",
     relationship: "Taken (Tyler's girl)",
-    occupation: "Bartender / party girl",
+    occupation: "Hairdresser / party girl",
     hobbies: "Clubbing, gym, brunch, TikTok",
     personality: "Shameless, bratty, extremely crude",
   },

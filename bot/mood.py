@@ -146,7 +146,7 @@ def mood_for_message(
             return {"mood": "aroused", "intensity": state["intensity"]}
 
     # 4) Baseline colour by time of day.
-    if time_period in ("club_night", "weekend_club_night"):
+    if time_period in ("club_night", "weekend_club_night", "night_bed", "weekend_night_bed"):
         return {"mood": "tender", "intensity": 2}
     return {"mood": DEFAULT_MOOD, "intensity": 1}
 
