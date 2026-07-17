@@ -110,18 +110,19 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 # Inspiration angles for the LLM-generated opening — one is sampled per
 # generation so first messages land on a different excuse every time.
 # They are hints, not scripts: the instruction tells her to invent her own.
-# ALL of them are rooted in the party where they met (Tyler's birthday —
-# see her core memories): this is her FIRST text to him ever, so the hook
-# must be the one thing THEY share — that night — not her opaque daily life.
-_OPENING_ANGLES_PARTY = [
-    "you finally caved and texted — you've been thinking about him since the eye contact at Tyler's party",
-    "you got his number off Tyler's phone at the party and he doesn't know that yet",
-    "you almost texted him like five times since the party and today you stopped chickening out",
-    "you bring up the moment at the party when you caught him staring at you",
-    "something today reminded you of that night at Tyler's party and now texting him is his problem",
-    "you tease that Tyler keeps bringing him up and now the party is stuck in your head again",
-    "you still remember exactly what he was wearing at the party and you're not over it",
-    "you tell him you knew you'd end up texting him the second you two met at that party",
+# ALL of them are rooted in the night they met — a club party a few days
+# ago (see her core memories): this is her FIRST text to him ever, so the
+# hook must be the one thing THEY share — that night — not her opaque
+# daily life.
+_OPENING_ANGLES_CLUB = [
+    "you finally caved and texted — that eye contact at the club a few nights ago hasn't left your head",
+    "you got his number off Tyler's phone at the club and he doesn't know that yet",
+    "you almost texted him every day since the club and today you stopped chickening out",
+    "you bring up the moment at the club when you caught him staring at you across the dance floor",
+    "a song from that night at the club just came on and now texting him is his problem",
+    "you tease that Tyler keeps bringing him up and now that night at the club is stuck in your head again",
+    "you still remember exactly what he was wearing at the club and you're not over it",
+    "you tell him you knew you'd end up texting him the second you two locked eyes at the club",
 ]
 
 
@@ -139,9 +140,9 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
     persona_prompt = engine.persona.to_system_prompt(include_unlocked=False)
     time_prompt = await get_time_prompt(heat="low")
     # One randomly-picked angle as INSPIRATION (never a script). Every angle
-    # circles the party where they met — the shared memory that makes a first
-    # text from her instantly make sense to him.
-    angle = random.choice(_OPENING_ANGLES_PARTY)
+    # circles the club night where they met — the shared memory that makes a
+    # first text from her instantly make sense to him.
+    angle = random.choice(_OPENING_ANGLES_CLUB)
     messages = [
         {
             "role": "system",
@@ -149,11 +150,12 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
                 f"{persona_prompt}\n\n"
                 f"{time_prompt}\n\n"
                 "You are texting him FIRST — your first text to him EVER. The reason "
-                "you're texting is the night you two MET: Tyler's birthday party (see "
-                "your core memories — the bikini top, the eye contact across the room). "
-                "Reference that night so he instantly knows who you are and why you're "
-                "in his phone. Where you are right now (above) can color the text, but "
-                "the party is the hook. "
+                "you're texting is the night you two MET, a few days ago: the party at "
+                "the club Tyler dragged everyone to (see your core memories — the "
+                "bikini top, the eye contact across the dance floor, the number you "
+                "took off Tyler's phone). Reference that night so he instantly knows "
+                "who you are and why you're in his phone. Where you are right now "
+                "(above) can color the text, but that club night is the hook. "
                 f"For inspiration only (do NOT copy it, invent your own if better): {angle}. "
                 "STRUCTURE: 2-3 short texts, each on its own line. The FIRST text is "
                 "ALWAYS just a short greeting — like 'hey', 'heyy', 'hey you', 'hey, "
