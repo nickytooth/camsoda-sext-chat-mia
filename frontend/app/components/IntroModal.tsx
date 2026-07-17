@@ -4,7 +4,7 @@ import { useState } from "react";
 
 // The intro video lives in frontend/public — swap the file (or this path)
 // to change what "Watch Intro" plays.
-const INTRO_VIDEO_SRC = "/mia.mp4";
+const INTRO_VIDEO_SRC = "/Intro%20Mia.mp4";
 
 // One-time intro shown on a fresh chat (first visit or right after a reset —
 // both flow through the name screen). Explains who Mia is before her opening
