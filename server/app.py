@@ -108,68 +108,20 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
 
 # Inspiration angles for the LLM-generated opening — one is sampled per
-# generation so first messages land on a different casual excuse every time.
+# generation so first messages land on a different excuse every time.
 # They are hints, not scripts: the instruction tells her to invent her own.
-# Keyed by time period (bot.time_context.get_time_period) so the excuse comes
-# from what she's concretely doing right now, with a small period-agnostic
-# pool mixed in for variety.
-_OPENING_ANGLES_BY_PERIOD = {
-    "morning_home": [
-        "Tyler just left for work and the apartment went dead quiet",
-        "you woke up from a weird dream he was in — you're not telling him what happened in it",
-        "you're still in bed deciding whether today deserves you",
-    ],
-    "midday_gym": [
-        "someone at the gym just did something ridiculous and you need to tell somebody",
-        "you're between sets, bored, hiding in your headphones",
-    ],
-    "salon_shift": [
-        "a client just told you an unbelievable story and he's the first person you thought of",
-        "your next appointment cancelled and now you have time to kill",
-        "the salon is dead today and you're sweeping hair out of boredom",
-    ],
-    "evening_pregame": [
-        "Tyler's watching something unbearably boring on TV and you're dying next to him",
-        "you're deciding what to wear in case you go out and want an opinion",
-    ],
-    "club_night": [
-        "you ducked into the club bathroom for a breather from the noise",
-        "the DJ played a song that put him in your head and now it's his problem",
-    ],
-    "night_bed": [
-        "you can't sleep and Tyler's snoring next to you",
-        "you just got home, everyone's asleep, and you're still a little buzzed",
-    ],
-    "weekend_hungover": [
-        "you're hungover on the couch, Tyler's at the gym, and you're bored out of your mind",
-        "you need someone to keep you alive through this hangover",
-    ],
-    "weekend_brunch": [
-        "your friends are deep in boyfriend talk at brunch and you checked out",
-        "the mimosas are hitting and texting him suddenly seemed like a great idea",
-    ],
-    "weekend_shopping": [
-        "you're in a fitting room and want a second opinion — keep it teasing, nothing graphic",
-        "you just bought something you have absolutely no business wearing",
-    ],
-    "weekend_home_tyler": [
-        "Tyler's flipping channels and you're dying of boredom right next to him",
-        "you're texting from the couch with the screen tilted away from Tyler",
-    ],
-    "weekend_getting_ready": [
-        "you're getting ready to go out — music on, pregame drink going, half-done makeup",
-        "you're two outfits deep and need a tiebreaker",
-    ],
-}
-# Late-night club/bed weekend periods share the weekday flavour.
-_OPENING_ANGLES_BY_PERIOD["weekend_club_night"] = _OPENING_ANGLES_BY_PERIOD["club_night"]
-_OPENING_ANGLES_BY_PERIOD["weekend_night_bed"] = _OPENING_ANGLES_BY_PERIOD["night_bed"]
-
-_OPENING_ANGLES_GENERIC = [
-    "you're bored and scrolling your contacts and landed on his name",
-    "a song is playing that puts you in a mood and he came to mind",
-    "you almost texted him yesterday, chickened out, and today you didn't",
-    "something you just saw or heard randomly reminded you of him",
+# ALL of them are rooted in the party where they met (Tyler's birthday —
+# see her core memories): this is her FIRST text to him ever, so the hook
+# must be the one thing THEY share — that night — not her opaque daily life.
+_OPENING_ANGLES_PARTY = [
+    "you finally caved and texted — you've been thinking about him since the eye contact at Tyler's party",
+    "you got his number off Tyler's phone at the party and he doesn't know that yet",
+    "you almost texted him like five times since the party and today you stopped chickening out",
+    "you bring up the moment at the party when you caught him staring at you",
+    "something today reminded you of that night at Tyler's party and now texting him is his problem",
+    "you tease that Tyler keeps bringing him up and now the party is stuck in your head again",
+    "you still remember exactly what he was wearing at the party and you're not over it",
+    "you tell him you knew you'd end up texting him the second you two met at that party",
 ]
 
 
@@ -181,28 +133,27 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
     once he answers. Without it the bare persona defaults to a generic vibe
     that then contradicts the first time-aware reply.
     """
-    from bot.time_context import get_time_period, get_time_prompt
+    from bot.time_context import get_time_prompt
     # Locked register: the conversation hasn't started, so the opening must be
     # a teasing hook, not explicit — HE is the one who unlocks that register.
     persona_prompt = engine.persona.to_system_prompt(include_unlocked=False)
     time_prompt = await get_time_prompt(heat="low")
-    # One randomly-picked angle as INSPIRATION (never a script). Mostly drawn
-    # from what she's concretely doing right now, with an occasional generic
-    # excuse mixed in so not every opening starts from her schedule.
-    period_angles = _OPENING_ANGLES_BY_PERIOD.get(get_time_period(), [])
-    if period_angles and random.random() < 0.75:
-        angle = random.choice(period_angles)
-    else:
-        angle = random.choice(_OPENING_ANGLES_GENERIC)
+    # One randomly-picked angle as INSPIRATION (never a script). Every angle
+    # circles the party where they met — the shared memory that makes a first
+    # text from her instantly make sense to him.
+    angle = random.choice(_OPENING_ANGLES_PARTY)
     messages = [
         {
             "role": "system",
             "content": (
                 f"{persona_prompt}\n\n"
                 f"{time_prompt}\n\n"
-                "You are texting him FIRST, starting the conversation. Invent a fresh, "
-                "casual reason you're reaching out RIGHT NOW — something true to where "
-                "you are and what you're doing at this exact moment (above). "
+                "You are texting him FIRST — your first text to him EVER. The reason "
+                "you're texting is the night you two MET: Tyler's birthday party (see "
+                "your core memories — the bikini top, the eye contact across the room). "
+                "Reference that night so he instantly knows who you are and why you're "
+                "in his phone. Where you are right now (above) can color the text, but "
+                "the party is the hook. "
                 f"For inspiration only (do NOT copy it, invent your own if better): {angle}. "
                 "STRUCTURE: 2-3 short texts, each on its own line. The FIRST text is "
                 "ALWAYS just a short greeting — like 'hey', 'heyy', 'hey you', 'hey, "
@@ -211,14 +162,11 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
                 "words, the way a real girl actually types — never a chain of clauses. "
                 "No period at the end. Lowercase is your style EXCEPT people's names — "
                 "those are ALWAYS capitalized: Tyler, never 'tyler'. "
-                "TONE: casual and warm — you're texting him "
-                "because you genuinely felt like it right now, not to seduce him. At "
-                "most a light flirty undertone; ZERO thirst. The hook is the concrete "
-                "thing that just happened (the client's story, the hangover, Tyler's "
-                "channel-flipping) — name it; never a vague 'was thinking about you'. "
+                "TONE: casual and warm with a teasing edge — you finally texted the guy "
+                "you've been thinking about since the party, but you keep it playful, "
+                "not desperate. At most a light flirty undertone; ZERO thirst. "
                 "NOT explicit — no 'wet', no anatomy, no graphic desires; you "
-                "never cross that line first. Tyler's birthday party is old backstory — "
-                "do NOT use it as your reason for texting. Do NOT mention your friends "
+                "never cross that line first. Do NOT mention your friends "
                 "by name (Jess, Cara, Lena) in this opening — he doesn't know them yet; "
                 "Tyler is fine to mention. Do NOT reuse the phrasing of your "
                 "opening_lines — say something fresh, in your own words."
