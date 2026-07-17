@@ -26,6 +26,7 @@ from bot.persona import load_persona
 from bot.providers.gemini_provider import GeminiProvider
 from bot.providers.grok_provider import GrokProvider
 from bot.chat_engine import ChatEngine, ChatResponse
+from bot.text_style import capitalize_names, capitalize_user_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -208,7 +209,9 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
                 "how are you' — in your own words, vary it every time. THEN the next "
                 "text(s) carry the reason you're texting. Each text is SHORT — 5-12 "
                 "words, the way a real girl actually types — never a chain of clauses. "
-                "No period at the end. TONE: casual and warm — you're texting him "
+                "No period at the end. Lowercase is your style EXCEPT people's names — "
+                "those are ALWAYS capitalized: Tyler, never 'tyler'. "
+                "TONE: casual and warm — you're texting him "
                 "because you genuinely felt like it right now, not to seduce him. At "
                 "most a light flirty undertone; ZERO thirst. The hook is the concrete "
                 "thing that just happened (the client's story, the hangover, Tyler's "
@@ -476,7 +479,9 @@ def _latinize_name(name: str) -> str:
             out.append(t.capitalize() if ch.isupper() else t)
         else:
             out.append(ch)
-    return "".join(out)
+    # Store the name properly capitalized regardless of how it was typed —
+    # the prompt quotes it verbatim and Mia copies whatever casing she sees.
+    return capitalize_user_name("".join(out))
 
 
 async def _maybe_send_opening(user_id: int) -> None:
@@ -504,6 +509,8 @@ async def _maybe_send_opening(user_id: int) -> None:
         except Exception:
             logger.warning("Dynamic opening failed, falling back to static", exc_info=True)
             opening = engine.persona.get_random_opening()
+        from bot.memory.facts import get_user_name
+        opening = capitalize_names(opening, (await get_user_name(user_id),))
         parts = [p.strip() for p in opening.split("\n") if p.strip()]
         from bot.memory.stm import add_message as stm_add
         for part in parts:

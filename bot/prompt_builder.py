@@ -1,6 +1,7 @@
 from bot.persona import Persona
 from bot.time_context import get_time_prompt
 from bot.mood import format_mood_for_prompt
+from bot.text_style import capitalize_user_name
 
 
 # Her explicitness mirrors HIS — keyed by how sexual his recent messages are
@@ -108,9 +109,13 @@ async def build_prompt(
     # render only once the chat is unlocked; None (cards) keeps them in.
     system_parts = [persona.to_system_prompt(include_unlocked=heat not in ("low", "rising"))]
 
-    # User's name
+    # User's name — capitalized even if stored lowercase (she copies the
+    # casing she sees, and names are the one exception to her lowercase style)
     if user_name:
-        system_parts.append(f"The user's name is {user_name}. Use it naturally alongside your usual pet names.")
+        system_parts.append(
+            f"The user's name is {capitalize_user_name(user_name)}. "
+            "Use it naturally alongside your usual pet names — always capitalized."
+        )
 
     # Time-of-day context (includes weather). Heat-aware: at low heat the
     # explicit "craving" line is omitted so casual chat stays casual.

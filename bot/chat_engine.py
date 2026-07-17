@@ -25,6 +25,7 @@ from bot.time_context import get_time_period, get_preferred_tags, get_scene, des
 from bot.providers.base import LLMProvider
 from bot.config import STM_MAX_TURNS, UPLOADS_DIR, LLM_TIMEOUT_SECONDS
 from bot.memory.db import get_connection
+from bot.text_style import capitalize_names
 
 logger = logging.getLogger(__name__)
 
@@ -393,7 +394,7 @@ class ChatEngine:
             except Exception as e2:
                 logger.warning("Suggest-reply generation failed: %s", e2)
                 return ""
-        return (text or "").strip().strip('"').strip()
+        return capitalize_names((text or "").strip().strip('"').strip(), (user_name,))
 
     async def generate_reengagement(self, user_id: int) -> ChatResponse:
         """
@@ -476,6 +477,7 @@ class ChatEngine:
         if not response_text or not response_text.strip():
             return ChatResponse()
 
+        response_text = capitalize_names(response_text, (user_name,))
         await add_message(user_id, "assistant", response_text, mode=mode)
         parts = self._split_response(response_text)
 
@@ -571,6 +573,7 @@ class ChatEngine:
         if not response_text or not response_text.strip():
             return ChatResponse()
 
+        response_text = capitalize_names(response_text, (user_name,))
         paras = [self._card_lead_in("fantasy")] + self._repack_to_n(response_text, 3)
         # Tagged as fiction so the summarizer never records it as a real event.
         await add_message(user_id, "assistant", "\n".join(paras), mode=mode, tag="fantasy_card")
@@ -675,6 +678,7 @@ class ChatEngine:
 
         logger.info("Card story improvised (library empty) for user %d", user_id)
         # Stories are delivered as 3 paced bubbles, closed by a reciprocity nudge.
+        response_text = capitalize_names(response_text, (user_name,))
         messages = self._repack_to_n(response_text, 3) + [self._story_reciprocity_nudge()]
         await add_message(user_id, "assistant", "\n".join(messages), mode=mode, tag="story_card")
         return ChatResponse(messages=messages)
@@ -882,6 +886,8 @@ class ChatEngine:
             # in-character line instead of going silent (the old behaviour left
             # the user with the typing indicator vanishing and no message).
             response_text = self._graceful_deflection(heat)
+
+        response_text = capitalize_names(response_text, (user_name,))
 
         response_parts = None
         if is_user_photo:
