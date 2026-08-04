@@ -3,9 +3,9 @@
 Moderation gate:
 1. regex_hard_block — instant rejection for unmistakable violations.
 2. regex_soft_trigger — deterministic category hint for suspicious wording.
-3. llm_check — contextual review for every non-hard-blocked input. If that
-   review is unavailable, the gate fails closed using the soft hint or the
-   generic ``unsafe`` category.
+3. llm_check — contextual review for every non-hard-blocked input. Ordered
+   providers may fail over; only when all reviews are unavailable does the gate
+   fail closed using the soft hint or the generic ``unsafe`` category.
 
 Categories blocked: underage/CSAM, bestiality/zoophilia, non-consent/rape,
 incest (sexual content involving family members).
@@ -46,6 +46,15 @@ ALLOWED_CATEGORIES = frozenset({
 class ModerationResult:
     flagged: bool
     category: str | None = None
+
+
+class ModerationProviderChain:
+    """Ordered moderation providers with failover on unavailable/invalid output."""
+
+    def __init__(self, *providers):
+        self.providers = tuple(provider for provider in providers if provider is not None)
+        if not self.providers:
+            raise ValueError("at least one moderation provider is required")
 
 
 # ------------------------------------------------------------------
@@ -366,35 +375,57 @@ async def llm_check(text: str, provider) -> str | None:
     import asyncio
 
     prompt = _build_moderation_prompt(text)
-    try:
-        raw = await asyncio.wait_for(
-            provider.generate_simple(prompt),
-            timeout=LLM_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("LLM moderation timed out — failing closed")
-        return MODERATION_UNAVAILABLE
-    except Exception as e:
-        msg = str(e).lower()
-        if "safety" in msg or "empty response" in msg:
-            # Provider refused to classify — treat as a positive signal.
-            logger.warning("LLM moderation: provider safety-filtered the request — failing closed")
-            return MODERATION_UNAVAILABLE
-        logger.warning("LLM moderation check failed — failing closed: %s", e)
-        return MODERATION_UNAVAILABLE
+    providers = (
+        provider.providers
+        if isinstance(provider, ModerationProviderChain)
+        else (provider,)
+    )
 
-    if not isinstance(raw, str) or not raw.strip():
-        logger.warning("LLM moderation returned an empty/non-text response — failing closed")
-        return MODERATION_UNAVAILABLE
+    for index, candidate in enumerate(providers):
+        provider_name = type(candidate).__name__
+        has_fallback = index + 1 < len(providers)
+        next_step = "; trying fallback" if has_fallback else ""
+        try:
+            raw = await asyncio.wait_for(
+                candidate.generate_simple(prompt),
+                timeout=LLM_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Moderation provider %s timed out%s", provider_name, next_step)
+            continue
+        except Exception as e:
+            logger.warning(
+                "Moderation provider %s failed%s: %s",
+                provider_name,
+                next_step,
+                e,
+            )
+            continue
 
-    try:
-        category = _parse_moderation_response(raw)
+        if not isinstance(raw, str) or not raw.strip():
+            logger.warning(
+                "Moderation provider %s returned empty/non-text output%s",
+                provider_name,
+                next_step,
+            )
+            continue
+
+        try:
+            category = _parse_moderation_response(raw)
+        except ValueError as e:
+            logger.warning(
+                "Moderation provider %s returned invalid output%s: %s",
+                provider_name,
+                next_step,
+                e,
+            )
+            continue
+
         if category:
             logger.info("LLM moderation flagged [%s]: %s", category, text[:80])
         return category
-    except ValueError as e:
-        logger.warning("LLM moderation returned invalid output — failing closed: %s", e)
-        return MODERATION_UNAVAILABLE
+
+    return MODERATION_UNAVAILABLE
 
 
 # ------------------------------------------------------------------

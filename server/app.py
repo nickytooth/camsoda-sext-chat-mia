@@ -25,6 +25,7 @@ from bot.persona import load_persona
 from bot.providers.gemini_provider import GeminiProvider
 from bot.providers.grok_provider import GrokProvider
 from bot.chat_engine import ChatEngine, ChatResponse
+from bot.moderation import ModerationProviderChain
 from bot.text_style import capitalize_names, capitalize_user_name
 
 logging.basicConfig(
@@ -61,11 +62,10 @@ async def lifespan(app: FastAPI):
     # thinking_budget=0 → no "thinking" latency; this provider only writes short
     # replies (suggestions + Grok fallback), so speed matters more than reasoning.
     fallback_provider = GeminiProvider(GEMINI_FALLBACK_MODEL, thinking_budget=0)
-    # Input moderation: Grok, not Gemini. Gemini's non-configurable
-    # PROHIBITED_CONTENT filter refuses to even classify the very content we
-    # need to detect (bestiality, CSAM, etc.), returning an empty response.
-    # Grok reliably classifies it and still distinguishes adult roleplay.
-    moderation_provider = GrokProvider()
+    # Use the available Gemini path first, then Grok when Gemini returns an
+    # invalid/safety-filtered result. Only a failure of both providers blocks
+    # fail-closed, so one exhausted API account cannot reject harmless chat.
+    moderation_provider = ModerationProviderChain(fallback_provider, nsfw_provider)
 
     engine = ChatEngine(
         persona=persona,

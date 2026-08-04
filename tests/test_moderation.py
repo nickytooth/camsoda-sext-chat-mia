@@ -4,6 +4,7 @@ import unittest
 from bot.moderation import (
     GENERIC_UNSAFE_CATEGORY,
     MODERATION_UNAVAILABLE,
+    ModerationProviderChain,
     _build_moderation_prompt,
     _parse_moderation_response,
     llm_check,
@@ -80,6 +81,33 @@ class ModerationGateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.flagged)
         self.assertEqual(result.category, GENERIC_UNSAFE_CATEGORY)
+
+    async def test_provider_failure_uses_clean_fallback_instead_of_blocking(self):
+        primary = StubProvider(error=RuntimeError("credits exhausted"))
+        fallback = StubProvider(response='{"flagged": false, "category": null}')
+
+        result = await moderate(
+            "hey",
+            ModerationProviderChain(primary, fallback),
+        )
+
+        self.assertFalse(result.flagged)
+        self.assertIsNotNone(primary.prompt)
+        self.assertIsNotNone(fallback.prompt)
+
+    async def test_invalid_primary_output_uses_flagged_fallback(self):
+        primary = StubProvider(response="not json")
+        fallback = StubProvider(
+            response='{"flagged": true, "category": "non-consent"}'
+        )
+
+        result = await moderate(
+            "a semantic unsafe paraphrase",
+            ModerationProviderChain(primary, fallback),
+        )
+
+        self.assertTrue(result.flagged)
+        self.assertEqual(result.category, "non-consent")
 
     async def test_malformed_or_failed_llm_result_fails_closed(self):
         for provider in (

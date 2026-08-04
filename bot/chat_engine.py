@@ -35,7 +35,7 @@ from bot.time_context import (
 from bot.providers.base import LLMProvider
 from bot.config import STM_MAX_TURNS, LLM_TIMEOUT_SECONDS
 from bot.memory.db import get_connection
-from bot.moderation import moderate
+from bot.moderation import ModerationProviderChain, moderate
 from bot.text_style import capitalize_names
 from bot.output_guard import (
     append_system_correction,
@@ -158,7 +158,7 @@ class ChatEngine:
         nsfw_provider: LLMProvider,
         classifier_provider: LLMProvider,
         fallback_provider: LLMProvider | None = None,
-        moderation_provider: LLMProvider | None = None,
+        moderation_provider: LLMProvider | ModerationProviderChain | None = None,
     ):
         self.persona = persona
         self.nsfw_persona = nsfw_persona
