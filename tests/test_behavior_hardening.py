@@ -146,7 +146,12 @@ class OutputBoundaryTests(unittest.TestCase):
             ("here's a video i picked for you", "media_offer_mismatch"),
             ("here are two photos i picked for you", "media_offer_mismatch"),
             ("here's a nude i picked for you", "media_offer_mismatch"),
+            ("here's a naked photo i picked for you", "media_offer_mismatch"),
+            ("here's an explicit photo i picked for you", "media_offer_mismatch"),
             ("i discounted this to 2 tokens", "commerce_price_claim"),
+            ("this one is only five tokens", "commerce_price_claim"),
+            ("i made this photo cheaper for you", "commerce_price_claim"),
+            ("this photo is $5 for you", "commerce_price_claim"),
         ):
             with self.subTest(text=text):
                 result = validate_mia_reply(text, **offer)
@@ -161,6 +166,15 @@ class OutputBoundaryTests(unittest.TestCase):
             commerce_explicitness="nude",
         )
         self.assertTrue(nude_photo.ok, nude_photo.reasons)
+
+        explicit_photo = validate_mia_reply(
+            "here's an explicit photo i picked for you",
+            heat="high",
+            commerce_action="offer_current",
+            commerce_media_type="photo",
+            commerce_explicitness="explicit",
+        )
+        self.assertTrue(explicit_photo.ok, explicit_photo.reasons)
 
     def test_media_references_and_user_requests_are_not_false_positives(self):
         for text in (
@@ -483,10 +497,13 @@ class BatchFailureDeliveryTests(unittest.IsolatedAsyncioTestCase):
         engine._process_sexting = AsyncMock(side_effect=RuntimeError("provider down"))
         callback = AsyncMock()
 
-        with self.assertLogs("bot.chat_engine", level="ERROR") as logs:
-            await engine._batch_collect(7, callback)
+        persisted = AsyncMock()
+        with patch("bot.chat_engine.add_message", persisted):
+            with self.assertLogs("bot.chat_engine", level="ERROR") as logs:
+                await engine._batch_collect(7, callback)
 
         callback.assert_awaited_once()
+        persisted.assert_awaited_once()
         delivered = callback.await_args.args[0]
         self.assertIsInstance(delivered, ChatResponse)
         self.assertEqual(len(delivered.messages), 1)

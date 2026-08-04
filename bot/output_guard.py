@@ -66,10 +66,14 @@ _MEDIA_TERM = (
     r"(?:photos?|pictures?|pics?|selfies?|videos?|vids?|clips?|files?|"
     r"nudes?|media|content)"
 )
+_MEDIA_QUALIFIER = (
+    r"(?:(?:nude|naked|explicit|hardcore|sexy|private|teasing|hot)\s+)?"
+)
 _FIRST_PERSON_MEDIA_CLAIM_RE = re.compile(
     rf"(?:"
     rf"\bi(?:(?:'ve| have)\s+(?:got\s+)?| got\s+| own\s+)"
-    rf"(?:(?:a|an|the|this|that|some|another|one|two|\d+)\s+)?{_MEDIA_TERM}\b|"
+    rf"(?:(?:a|an|the|this|that|my|some|another|one|two|\d+)\s+)?"
+    rf"{_MEDIA_QUALIFIER}{_MEDIA_TERM}\b|"
     rf"\b(?:i(?:(?:'ve| have|'m| am)\s+|\s+)"
     rf"(?:(?:can|could|will|would|might|may|wanna|want\s+to|"
     rf"am\s+going\s+to|just)\s+){{0,2}}|let\s+me\s+)"
@@ -79,11 +83,12 @@ _FIRST_PERSON_MEDIA_CLAIM_RE = re.compile(
     rf"saved|pick|picking|picked|choose|choosing|chose|show|showing|showed)"
     rf"\b.{{0,64}}\b{_MEDIA_TERM}\b|"
     rf"\b(?:here(?:'s|\s+is|\s+are)|this\s+is)\s+"
-    rf"(?:(?:a|an|the|this|that|my|some|one|two|\d+)\s+)?{_MEDIA_TERM}\b|"
+    rf"(?:(?:a|an|the|this|that|my|some|one|two|\d+)\s+)?"
+    rf"{_MEDIA_QUALIFIER}{_MEDIA_TERM}\b|"
     rf"\b(?:open|unlock|watch|check(?:\s+out)?|look\s+at)\s+"
     rf"(?:the|this|that|my)\s+{_MEDIA_TERM}\b|"
     rf"\b(?:want|wanna|would\s+you\s+like)\s+to\s+see\s+"
-    rf"(?:(?:a|the|this|my)\s+)?{_MEDIA_TERM}\b|"
+    rf"(?:(?:a|an|the|this|my)\s+)?{_MEDIA_QUALIFIER}{_MEDIA_TERM}\b|"
     rf"\b(?:a|the|this|that|my)\s+{_MEDIA_TERM}\b.{{0,64}}"
     rf"\bi\s+(?:sent|attached|posted|uploaded|shared|made|took|recorded|"
     rf"filmed|saved|picked|chose)\b"
@@ -103,8 +108,15 @@ _PLURAL_MEDIA_TERM_RE = re.compile(
     r"\b(?:photos|pictures|pics|selfies|nudes|videos|vids|clips|files)\b",
     re.IGNORECASE,
 )
-_NUDE_MEDIA_TERM_RE = re.compile(r"\bnudes?\b", re.IGNORECASE)
-_TOKEN_PRICE_RE = re.compile(r"(?<!\w)\d[\d,]*\s+tokens?\b", re.IGNORECASE)
+_NUDE_MEDIA_TERM_RE = re.compile(r"\b(?:nudes?|naked)\b", re.IGNORECASE)
+_EXPLICIT_MEDIA_TERM_RE = re.compile(r"\b(?:explicit|hardcore)\b", re.IGNORECASE)
+_TOKEN_PRICE_RE = re.compile(
+    r"(?:\btokens?\b|[$\u20ac\u00a3]\s*\d|\b\d[\d,.]*\s*(?:dollars?|bucks?)\b)",
+    re.IGNORECASE,
+)
+_OFFER_NEGOTIATION_RE = re.compile(
+    r"\b(?:discount(?:ed|ing)?|price|cheaper|deal)\b", re.IGNORECASE
+)
 
 
 def _media_offer_is_authorized(commerce_action: object | None) -> bool:
@@ -140,6 +152,11 @@ def _media_claim_matches_offer(
     if (
         _NUDE_MEDIA_TERM_RE.search(text)
         and expected_explicitness not in {"nude", "explicit"}
+    ):
+        return False
+    if (
+        _EXPLICIT_MEDIA_TERM_RE.search(text)
+        and expected_explicitness != "explicit"
     ):
         return False
     return True
@@ -474,7 +491,10 @@ def validate_mia_reply(
             explicitness=commerce_explicitness,
         ):
             reasons.append("media_offer_mismatch")
-    if _TOKEN_PRICE_RE.search(check_value):
+    if _TOKEN_PRICE_RE.search(check_value) or (
+        _media_offer_is_authorized(commerce_action)
+        and _OFFER_NEGOTIATION_RE.search(check_value)
+    ):
         reasons.append("commerce_price_claim")
     if _PROMPT_LEAK_RE.search(check_value):
         reasons.append("prompt_leak")

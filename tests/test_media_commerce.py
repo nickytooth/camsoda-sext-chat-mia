@@ -390,8 +390,13 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(decline.action, CommerceAction.REACT_TO_DECLINE)
         self.assertIsNone(decline.offer)
-        await self.service.mark_commerce_action_delivered(decline)
+        # The user's refusal is authoritative and is durable before Mia's
+        # cosmetic reaction is generated/finalized.
         threshold = self.repository.state["sales_snooze_until_batch"]
+        await self.service.mark_commerce_action_delivered(decline)
+        self.assertEqual(
+            self.repository.state["sales_snooze_until_batch"], threshold
+        )
         self.assertGreaterEqual(threshold - 2, 30)
         self.assertLessEqual(threshold - 2, 40)
         early = await self.service.plan_commerce_turn(
@@ -409,6 +414,26 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(accepted.offer)
         self.assertEqual(accepted.offer.trigger, "permission_reask")
+
+    async def test_decline_pause_survives_reaction_cancellation_and_replay(self):
+        offer = await self.service.plan_commerce_turn(
+            1, "send a photo", batch_number=1, heat="rising", period="bar_shift"
+        )
+        await self.deliver(offer)
+        decline = await self.service.plan_commerce_turn(
+            1, "not now", batch_number=2, heat="rising", period="bar_shift"
+        )
+        threshold = self.repository.state["sales_snooze_until_batch"]
+
+        self.assertTrue(await self.service.cancel_commerce_action(decline))
+        self.assertEqual(
+            self.repository.state["sales_snooze_until_batch"], threshold
+        )
+        self.assertTrue(await self.service.mark_commerce_action_delivered(decline))
+        self.assertTrue(await self.service.mark_commerce_action_delivered(decline))
+        self.assertEqual(
+            self.repository.state["sales_snooze_until_batch"], threshold
+        )
 
     async def test_global_do_not_sell_decline_snoozes_without_a_recent_offer(self):
         for text in ("don't sell me content", "не ми продавай контент"):

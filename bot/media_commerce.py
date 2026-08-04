@@ -201,6 +201,46 @@ class MediaCommerceService:
             batch_number=batch_number,
         )
 
+    async def _persist_decline_pause(
+        self,
+        user_id: int,
+        *,
+        batch_number: int,
+        decline_kind: str | None,
+    ) -> None:
+        """Durably apply a user refusal before generating the cosmetic reaction.
+
+        The refusal itself is the authoritative event; losing its 30--40/100
+        batch pause because the later assistant-text finalization failed would
+        allow an early proactive offer. Replays are idempotent and a hard
+        refusal upgrades an existing shorter soft pause.
+        """
+
+        state = await self.repository.get_engagement_state(user_id)
+        existing = state.get("sales_snooze_until_batch")
+        desired_hard_until = batch_number + config.MEDIA_HARD_DECLINE_SNOOZE_BATCHES
+        if (
+            existing is not None
+            and int(existing) > batch_number
+            and not (
+                decline_kind == "hard" and int(existing) < desired_hard_until
+            )
+        ):
+            return
+
+        if decline_kind == "hard":
+            delay = config.MEDIA_HARD_DECLINE_SNOOZE_BATCHES
+        else:
+            delay = self._random.randint(
+                config.MEDIA_SOFT_DECLINE_MIN_BATCHES,
+                config.MEDIA_SOFT_DECLINE_MAX_BATCHES,
+            )
+        await self.repository.set_decline_snooze(
+            user_id,
+            until_batch=batch_number + delay,
+            reask_pending=True,
+        )
+
     async def plan_commerce_turn(
         self,
         user_id: int,
@@ -250,6 +290,14 @@ class MediaCommerceService:
             or intent.decline_global
             or (pending and asked_at is not None)
         ):
+            # Persist the user's refusal now. The natural-language reaction is
+            # cosmetic and may later be compensated, but the sales pause must
+            # survive that failure and prevent an early proactive offer.
+            await self._persist_decline_pause(
+                user_id,
+                batch_number=batch_number,
+                decline_kind=intent.decline_kind,
+            )
             return CommerceDecision(
                 action=CommerceAction.REACT_TO_DECLINE,
                 brief=(
@@ -342,38 +390,17 @@ class MediaCommerceService:
         )
 
     async def mark_commerce_action_delivered(self, decision: CommerceDecision) -> bool:
-        """Commit non-offer pacing only after the visible reply is persisted."""
+        """Finalize non-offer pacing after the visible reply is persisted."""
         if decision.user_id is None or decision.batch_number is None:
             return False
         if decision.action == CommerceAction.REACT_TO_DECLINE:
-            state = await self.repository.get_engagement_state(decision.user_id)
-            existing = state.get("sales_snooze_until_batch")
-            # Idempotent replay of an already-applied same-kind decision must
-            # not pick another random threshold. A hard refusal, however,
-            # always extends an older/shorter soft pause to the full 100.
-            desired_hard_until = (
-                decision.batch_number + config.MEDIA_HARD_DECLINE_SNOOZE_BATCHES
-            )
-            if (
-                existing is not None
-                and int(existing) > decision.batch_number
-                and not (
-                    decision.decline_kind == "hard"
-                    and int(existing) < desired_hard_until
-                )
-            ):
-                return True
-            if decision.decline_kind == "hard":
-                delay = config.MEDIA_HARD_DECLINE_SNOOZE_BATCHES
-            else:
-                delay = self._random.randint(
-                    config.MEDIA_SOFT_DECLINE_MIN_BATCHES,
-                    config.MEDIA_SOFT_DECLINE_MAX_BATCHES,
-                )
-            await self.repository.set_decline_snooze(
+            # Planning already persisted the refusal before any model call.
+            # Keep this hook idempotent for adapters/replays and for decisions
+            # created outside the normal planner path.
+            await self._persist_decline_pause(
                 decision.user_id,
-                until_batch=decision.batch_number + delay,
-                reask_pending=True,
+                batch_number=decision.batch_number,
+                decline_kind=decision.decline_kind,
             )
             return True
         if decision.action == CommerceAction.ASK_PERMISSION_AGAIN:
@@ -384,7 +411,7 @@ class MediaCommerceService:
         return decision.action in {CommerceAction.NONE, CommerceAction.ACKNOWLEDGE_UNLOCK}
 
     async def cancel_commerce_action(self, decision: CommerceDecision) -> bool:
-        """Non-offer planning is side-effect free, so cancellation is a no-op."""
+        """Cancel presentation only; a user's durable refusal is never undone."""
         return decision.action not in {
             CommerceAction.OFFER_CURRENT,
             CommerceAction.OFFER_FALLBACK,

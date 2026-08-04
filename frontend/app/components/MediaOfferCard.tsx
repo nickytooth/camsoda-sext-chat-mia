@@ -74,6 +74,13 @@ export default function MediaOfferCard({
       : 0.75;
   const previewFailed = !preview || failedPreviewUrl === preview;
 
+  // Each newly signed derivative gets its own one-shot error recovery. Without
+  // this reset, one early network failure would disable recovery for every
+  // later URL even though the scheduled pre-expiry refresh kept rotating them.
+  useEffect(() => {
+    previewRefreshAttempted.current = false;
+  }, [preview]);
+
   // Locked derivatives are signed too. Refresh shortly before their bearer
   // URL expires so a long-open conversation never falls back to a blank card.
   useEffect(() => {
