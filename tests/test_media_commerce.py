@@ -272,6 +272,12 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(decision.offer.content_id, "mia_bar_001")
         self.assertEqual(decision.action, CommerceAction.OFFER_CURRENT)
+        self.assertEqual(decision.item_locations, ("bar", "bathroom"))
+        self.assertEqual(decision.current_locations, ("bar", "stockroom"))
+        self.assertEqual(
+            decision.offered_item_description,
+            decision.offer.description,
+        )
 
     async def test_explicit_requested_location_beats_current_location(self):
         decision = await self.service.plan_commerce_turn(
@@ -303,6 +309,9 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.offer.content_id, "mia_home_pose_001")
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
         self.assertIn("Current context:", decision.brief)
+        self.assertEqual(decision.item_locations, ("home", "bedroom"))
+        self.assertEqual(decision.current_locations, ("bar", "stockroom"))
+        self.assertTrue(decision.current_context)
 
     async def test_fallback_explains_both_location_and_requested_type_mismatch(self):
         self.repository.unlocked.add("mia_club_clip_001")

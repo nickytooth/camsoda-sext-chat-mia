@@ -27,7 +27,7 @@ class MediaCatalogValidationTests(unittest.TestCase):
             path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
             return load_media_catalog(path)
 
-    def test_runtime_catalog_is_valid_and_safe_by_default(self):
+    def test_runtime_catalog_is_empty_public_fallback(self):
         catalog = load_media_catalog(RUNTIME_CATALOG_PATH)
         self.assertEqual(catalog.items, ())
 

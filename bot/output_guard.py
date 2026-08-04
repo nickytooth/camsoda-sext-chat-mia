@@ -99,7 +99,9 @@ _FIRST_PERSON_MEDIA_CLAIM_RE = re.compile(
 _MEDIA_OFFER_ACTIONS = frozenset({"offer_current", "offer_fallback"})
 
 _PHOTO_MEDIA_TERM_RE = re.compile(
-    r"\b(?:photo|picture|pic|selfie|nude)s?\b", re.IGNORECASE
+    r"\b(?:(?:photo|picture|pic|selfie)s?|"
+    r"nudes?(?!\s+(?:videos?|vids?|clips?)\b))\b",
+    re.IGNORECASE,
 )
 _VIDEO_MEDIA_TERM_RE = re.compile(
     r"\b(?:video|vid|clip)s?\b", re.IGNORECASE
@@ -118,6 +120,238 @@ _OFFER_NEGOTIATION_RE = re.compile(
     r"\b(?:discount(?:ed|ing)?|price|cheaper|deal)\b", re.IGNORECASE
 )
 
+# Curated catalog descriptions are the source of truth for where an offered
+# item was captured.  A model may naturally paraphrase "from her bathroom" as
+# "from my bathroom", but it must not turn that real item into a bedroom/bar
+# file that does not exist.  These are deliberately the same controlled
+# location concepts used by the media catalog, with only user-facing aliases.
+_MEDIA_LOCATION_ALIASES: dict[str, tuple[str, ...]] = {
+    "home": ("home", "house", "apartment", "place"),
+    "bedroom": ("bedroom", "bed"),
+    "bathroom": ("bathroom", "bath"),
+    "kitchen": ("kitchen",),
+    "shower": ("shower",),
+    "gym": ("gym",),
+    "locker_room": ("locker room",),
+    "bar": ("bar", "work", "shift"),
+    "stockroom": ("stockroom", "stock room", "back room"),
+    "club": ("club",),
+    # "show" is intentionally excluded here: in generated copy it is usually
+    # a verb ("show you a video"), not a claim that the item came from a gig.
+    "concert": ("concert",),
+    "beach": ("beach",),
+    "car": ("car",),
+    "hotel": ("hotel",),
+    "outdoors": ("outdoors", "outside"),
+}
+
+_MEDIA_LOCATION_TERMS = tuple(
+    sorted(
+        {
+            alias
+            for aliases in _MEDIA_LOCATION_ALIASES.values()
+            for alias in aliases
+        },
+        key=len,
+        reverse=True,
+    )
+)
+_MEDIA_LOCATION_TERM_PATTERN = "(?:" + "|".join(
+    re.escape(alias).replace(r"\ ", r"\s+")
+    for alias in _MEDIA_LOCATION_TERMS
+) + ")"
+_LOCATION_TARGET = (
+    rf"(?:my|the|a|an|her|our)?\s*"
+    rf"(?P<location>{_MEDIA_LOCATION_TERM_PATTERN})\b"
+)
+_MEDIA_LOCATION_DIRECT_RE = re.compile(
+    rf"\b(?:(?:this|that|my|the|a|an|some)\s+)?{_MEDIA_TERM}\b\s*"
+    rf"(?:"
+    rf"(?:is|was|came)?\s*(?:from|in|at|inside)\s+|"
+    rf"(?:is|was)?\s*(?:made|taken|shot|filmed|recorded)\s+(?:in|at)\s+|"
+    rf"i\s+(?:made|took|shot|filmed|recorded)\s+(?:it\s+)?(?:in|at)\s+"
+    rf")"
+    rf"{_LOCATION_TARGET}",
+    re.IGNORECASE,
+)
+_MEDIA_THEN_ONE_LOCATION_RE = re.compile(
+    rf"\b{_MEDIA_TERM}\b\s*[.!?,:;\-]\s*"
+    rf"(?:(?:this|that)\s+)?one(?:'s|\s+is|\s+was)?\s+"
+    rf"(?:from|in|at|inside)\s+{_LOCATION_TARGET}",
+    re.IGNORECASE,
+)
+_MEDIA_LOCATION_PREFIX_CLAIM_RE = re.compile(
+    rf"\b(?:here(?:'s|\s+is)|this\s+is|i\s+have|i(?:'ve|\s+have)\s+got|"
+    rf"i\s+got|my)\s+(?:(?:a|an|the|this|that|my)\s+)?"
+    rf"(?P<location>{_MEDIA_LOCATION_TERM_PATTERN})\s+"
+    rf"(?:mirror\s+)?{_MEDIA_TERM}\b",
+    re.IGNORECASE,
+)
+_MEDIA_PRONOUN_LOCATION_RES = (
+    re.compile(
+        rf"\b(?:this|that)\s+one(?:'s|\s+is|\s+was)?\s+"
+        rf"(?:from|in|at|inside)\s+{_LOCATION_TARGET}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:i\s+)?(?:made|filmed|recorded|shot|took)\s+"
+        rf"(?:this|it|that|one)\s+(?:in|at)\s+{_LOCATION_TARGET}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:this|it|that|one)\s+(?:was\s+)?"
+        rf"(?:made|filmed|recorded|shot|taken)\s+(?:in|at)\s+{_LOCATION_TARGET}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:(?:this|that|the)\s+)?one\s+i\s+"
+        rf"(?:made|filmed|recorded|shot|took)\s+(?:in|at)\s+{_LOCATION_TARGET}",
+        re.IGNORECASE,
+    ),
+)
+_NEGATED_CAPTURE_PREFIX_RE = re.compile(
+    r"^\s*(?:i\s+)?"
+    r"(?:can(?:not|'t)|could(?:not|n't)|won't|(?:am\s+)?not\s+able\s+to)\s+"
+    r"(?:(?:currently|safely|properly|exactly|really|just)\s+)*"
+    r"(?:film|take|record|shoot|make|send|show)\s+"
+    r"(?:(?:a|an|the|this|that|my|any)\s+)?"
+    r"(?:(?:quick|new|nude|naked|private|sexy|explicit|short|little|fresh)\s+)*$",
+    re.IGNORECASE,
+)
+_CLAUSE_BOUNDARY_RE = re.compile(
+    r"[.!?;\n]|\b(?:but|however|though)\b", re.IGNORECASE
+)
+
+
+def _media_location_keys(text: str) -> set[str]:
+    """Return controlled location concepts explicitly named in safe copy."""
+
+    lowered = text.lower()
+    found: set[str] = set()
+    for key, aliases in _MEDIA_LOCATION_ALIASES.items():
+        if any(
+            re.search(
+                r"(?<!\w)" + re.escape(alias).replace(r"\ ", r"\s+") + r"(?!\w)",
+                lowered,
+            )
+            for alias in aliases
+        ):
+            found.add(key)
+    return found
+
+
+def _canonical_media_location(value: str) -> str | None:
+    normalised = " ".join(value.lower().split())
+    for key, aliases in _MEDIA_LOCATION_ALIASES.items():
+        if normalised in aliases:
+            return key
+    return None
+
+
+def _locations_compatible(expected: set[str], claimed: str) -> bool:
+    if claimed in expected:
+        return True
+    residential = {"home", "bedroom", "bathroom", "kitchen", "shower"}
+    if claimed == "home" and expected & residential:
+        return True
+    if "home" in expected and claimed in residential:
+        return True
+    if claimed in {"bathroom", "shower"} and expected & {"bathroom", "shower"}:
+        return True
+    if claimed in {"gym", "locker_room"} and expected & {"gym", "locker_room"}:
+        return True
+    return False
+
+
+def _normalise_media_location_keys(value: object | None) -> set[str]:
+    if value is None:
+        return set()
+    candidates = (value,) if isinstance(value, str) else value
+    try:
+        return {
+            str(candidate)
+            for candidate in candidates  # type: ignore[union-attr]
+            if str(candidate) in _MEDIA_LOCATION_ALIASES
+        }
+    except TypeError:
+        return set()
+
+
+def _negated_current_capture(text: str, media_start: int) -> bool:
+    """True only when a nearby negation directly governs a capture verb."""
+
+    clause_start = 0
+    for boundary in _CLAUSE_BOUNDARY_RE.finditer(text, 0, media_start):
+        clause_start = boundary.end()
+    return bool(
+        _NEGATED_CAPTURE_PREFIX_RE.search(text[clause_start:media_start])
+    )
+
+
+def _media_location_claims(text: str) -> list[tuple[str, int, bool]]:
+    """Extract explicit item-origin claims without absorbing nearby context.
+
+    The boolean marks a direct media-noun claim, the only shape that can be a
+    negated attempt to capture something at Mia's current location.
+    """
+
+    claims: list[tuple[str, int, bool]] = []
+    for pattern, direct in (
+        (_MEDIA_LOCATION_DIRECT_RE, True),
+        (_MEDIA_THEN_ONE_LOCATION_RE, False),
+        (_MEDIA_LOCATION_PREFIX_CLAIM_RE, False),
+        *((pattern, False) for pattern in _MEDIA_PRONOUN_LOCATION_RES),
+    ):
+        for match in pattern.finditer(text):
+            location = match.group("location")
+            claims.append((location, match.start(), direct))
+    return claims
+
+
+def _has_unbacked_location_media_claim(text: str) -> bool:
+    """Catch card-style provenance claims even without an authorised card."""
+
+    if _MEDIA_LOCATION_PREFIX_CLAIM_RE.search(text):
+        return True
+    if any(pattern.search(text) for pattern in _MEDIA_PRONOUN_LOCATION_RES):
+        return True
+    for match in _MEDIA_LOCATION_DIRECT_RE.finditer(text):
+        prefix = text[match.start() : match.end()].lstrip().lower()
+        if prefix.startswith(("this ", "my ", "a ", "an ")):
+            return True
+    return False
+
+
+def _media_location_matches_description(
+    text: str,
+    description: object | None,
+    media_locations: object | None = None,
+) -> bool:
+    """Reject only explicit, contradictory claims about the selected item.
+
+    A fallback reply may also state the current location (for example, "I
+    can't film a video in the bar right now").  Negated current-capture clauses
+    are therefore ignored, while positive claims such as "a video from my
+    bedroom" are checked against the catalog description.
+    """
+
+    expected = _normalise_media_location_keys(media_locations)
+    if not expected:
+        # Backwards-compatible fail-safe for embedders/tests that supply only
+        # the curated description. Production always supplies canonical tags.
+        expected = _media_location_keys(str(description or ""))
+    if not expected:
+        return True
+
+    for raw_location, start, direct in _media_location_claims(text):
+        claimed = _canonical_media_location(raw_location)
+        if not claimed or _locations_compatible(expected, claimed):
+            continue
+        if direct and _negated_current_capture(text, start):
+            continue
+        return False
+    return True
+
 
 def _media_offer_is_authorized(commerce_action: object | None) -> bool:
     value = getattr(commerce_action, "value", commerce_action)
@@ -129,6 +363,8 @@ def _media_claim_matches_offer(
     *,
     media_type: object | None,
     explicitness: object | None,
+    description: object | None = None,
+    media_locations: object | None = None,
 ) -> bool:
     """Require a claim to describe the one real item selected by the backend."""
 
@@ -159,7 +395,7 @@ def _media_claim_matches_offer(
         and expected_explicitness != "explicit"
     ):
         return False
-    return True
+    return _media_location_matches_description(text, description, media_locations)
 
 # Narrow fingerprints of prompt/persona sections. These catch accidental
 # verbatim leakage without treating ordinary words such as "rules" or
@@ -468,6 +704,8 @@ def validate_mia_reply(
     commerce_action: object | None = None,
     commerce_media_type: object | None = None,
     commerce_explicitness: object | None = None,
+    commerce_media_description: object | None = None,
+    commerce_media_locations: object | None = None,
 ) -> ValidationResult:
     """Validate a free-text model reply at the final output boundary."""
     value = (text or "").strip()
@@ -481,18 +719,26 @@ def validate_mia_reply(
         reasons.append("provider_refusal")
     if _SERVICE_RE.search(check_value):
         reasons.append("service_voice")
-    media_claim = bool(_FIRST_PERSON_MEDIA_CLAIM_RE.search(check_value))
-    if media_claim:
-        if not _media_offer_is_authorized(commerce_action):
-            reasons.append("unauthorized_media_claim")
-        elif not _media_claim_matches_offer(
+    offer_authorized = _media_offer_is_authorized(commerce_action)
+    media_claim = bool(
+        _FIRST_PERSON_MEDIA_CLAIM_RE.search(check_value)
+        or _has_unbacked_location_media_claim(check_value)
+    )
+    if media_claim and not offer_authorized:
+        reasons.append("unauthorized_media_claim")
+    if offer_authorized and (
+        media_claim or _media_location_claims(check_value)
+    ):
+        if not _media_claim_matches_offer(
             check_value,
             media_type=commerce_media_type,
             explicitness=commerce_explicitness,
+            description=commerce_media_description,
+            media_locations=commerce_media_locations,
         ):
             reasons.append("media_offer_mismatch")
     if _TOKEN_PRICE_RE.search(check_value) or (
-        _media_offer_is_authorized(commerce_action)
+        offer_authorized
         and _OFFER_NEGOTIATION_RE.search(check_value)
     ):
         reasons.append("commerce_price_claim")
@@ -577,7 +823,8 @@ def correction_prompt(reasons: tuple[str, ...], heat: str) -> str:
     if "media_offer_mismatch" in reasons:
         constraints.append(
             "The attached card contains exactly one backend-selected item. Describe only its "
-            "selected media type and explicitness; never change it or imply multiple files."
+            "selected media type, explicitness, and setting from the trusted commerce brief; "
+            "never change them or imply multiple files."
         )
     if "commerce_price_claim" in reasons:
         constraints.append(

@@ -157,7 +157,12 @@ _SAFE_MEDIA_OFFER_FIELDS = (
 
 _SAFE_CONTENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,79}$")
 _UNSAFE_MEDIA_METADATA_RE = re.compile(
-    r"(?:https?://|s3://|r2://|(?:full|preview|poster)_key\b|cloudflare\b|bucket\b)",
+    r"(?:https?://|s3://|r2://|file:(?://)?|[a-z]:[\\/]|"
+    r"~[\\/]|(?:\.\.[\\/])+|\\\\[^\\/\s]+[\\/]|"
+    r"/(?:home|users|var|tmp|private|opt|srv|mnt|media|etc|root|app|workspace|usr|dev|proc|run)(?:[\\/]|$)|"
+    r"(?:premium|previews|posters)[\\/]|(?:full|preview|poster)_key\b|"
+    r"x-amz-(?:algorithm|credential|date|expires|signedheaders|signature)\b|"
+    r"cloudflare\b|bucket\b)",
     re.IGNORECASE,
 )
 
@@ -686,6 +691,8 @@ class ChatEngine:
         commerce_action: str | None = None,
         commerce_media_type: str | None = None,
         commerce_explicitness: str | None = None,
+        commerce_media_description: str | None = None,
+        commerce_media_locations: tuple[str, ...] | None = None,
     ) -> str:
         """Generate a sexting reply, hardened against hangs and silent refusals.
 
@@ -719,6 +726,8 @@ class ChatEngine:
             commerce_action=commerce_action,
             commerce_media_type=commerce_media_type,
             commerce_explicitness=commerce_explicitness,
+            commerce_media_description=commerce_media_description,
+            commerce_media_locations=commerce_media_locations,
         )
         rejection_reasons = result.reasons
         if result.ok:
@@ -750,6 +759,8 @@ class ChatEngine:
             commerce_action=commerce_action,
             commerce_media_type=commerce_media_type,
             commerce_explicitness=commerce_explicitness,
+            commerce_media_description=commerce_media_description,
+            commerce_media_locations=commerce_media_locations,
         )
         fallback_reasons = fallback_result.reasons
         if fallback_result.ok:
@@ -1469,6 +1480,16 @@ class ChatEngine:
             ),
             commerce_explicitness=(
                 str(commerce_turn.media_offer.get("explicitness", ""))
+                if commerce_turn.media_offer
+                else None
+            ),
+            commerce_media_description=(
+                str(commerce_turn.media_offer.get("description", ""))
+                if commerce_turn.media_offer
+                else None
+            ),
+            commerce_media_locations=(
+                tuple(_object_value(commerce_turn.decision, "item_locations", ()) or ())
                 if commerce_turn.media_offer
                 else None
             ),

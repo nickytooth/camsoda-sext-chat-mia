@@ -29,6 +29,7 @@ from bot.media_repository import (
     WalletSnapshot,
 )
 from bot.token_service import DemoTokenService, TokenService
+from bot.time_context import get_media_locations
 
 
 class CommerceAction(str, Enum):
@@ -64,12 +65,19 @@ class CommerceDecision:
     action: CommerceAction = CommerceAction.NONE
     brief: str = ""
     offer: MediaOffer | None = None
+    current_context: str = ""
+    offered_item_description: str = ""
     # Internal state needed to commit a non-offer action only after its visible
     # assistant response has been persisted. Prompt serialization is allowlist-
     # based and never includes these fields.
     user_id: int | None = None
     batch_number: int | None = None
     decline_kind: str | None = None
+    # Canonical catalog/current locations stay inside the backend trust
+    # boundary. They are used by the deterministic output guard and are never
+    # serialized into the chat payload or exposed to the browser.
+    item_locations: tuple[str, ...] = ()
+    current_locations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,10 +180,12 @@ class MediaCommerceService:
             # A concurrent planner or unlock won the per-user reservation race.
             # Failing closed is safer than attaching a duplicate/resold card.
             return CommerceDecision()
+        current_context = ""
         if planned.action == CommerceAction.OFFER_CURRENT.value:
             brief = f"Offer this real {planned.item.media_type}: {planned.description}."
         else:
             reason = planned.fallback_reason or "There is no unopened exact-current match."
+            current_context = reason
             brief = (
                 f"Current context: {reason}. Offer this real alternative as an older or "
                 f"different-location {planned.item.media_type}: {planned.description}."
@@ -197,8 +207,12 @@ class MediaCommerceService:
             action=CommerceAction(planned.action),
             brief=brief,
             offer=offer,
+            current_context=current_context,
+            offered_item_description=planned.description,
             user_id=user_id,
             batch_number=batch_number,
+            item_locations=tuple(planned.item.tags.get("location", ())),
+            current_locations=tuple(get_media_locations(period)),
         )
 
     async def _persist_decline_pause(

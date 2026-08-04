@@ -121,6 +121,7 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("COMMERCE BRIEF (TRUSTED BACKEND ACTION)", system)
         self.assertIn('"action": "offer_current"', system)
         self.assertIn("a playful mirror photo from behind the bar", system)
+        self.assertIn("Never substitute a different room or location", system)
         self.assertNotIn("mia_bar_001", system)
         self.assertNotIn("premium/", system)
         self.assertNotIn("5 tokens", system)
@@ -138,17 +139,54 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("No media card is attached", system)
         self.assertIn("do not argue", system)
 
-    async def test_storage_reference_in_curated_copy_is_dropped(self):
+    async def test_production_offer_separates_current_context_from_item_origin(self):
         _, messages = await self._build(
+            heat="high",
             commerce_brief={
                 "action": "offer_fallback",
-                "brief": "use https://example.com/private.jpg from the bucket",
-            }
+                "brief": "legacy combined copy must not be used",
+                "current_context": "customers are around at the bar",
+                "offered_item_description": "a synthetic test clip from her bathroom",
+                "item_locations": ("bathroom",),
+                "current_locations": ("bar", "stockroom"),
+            },
         )
         system = messages[0]["content"]
 
-        self.assertIn('"curated_copy": ""', system)
-        self.assertNotIn("example.com", system)
+        self.assertIn('"current_context": "customers are around at the bar"', system)
+        self.assertIn(
+            '"offered_item_description": "a synthetic test clip from her bathroom"',
+            system,
+        )
+        self.assertNotIn("legacy combined copy must not be used", system)
+        self.assertNotIn("item_locations", system)
+        self.assertNotIn("current_locations", system)
+        self.assertIn("never describes the file's origin", system)
+
+    async def test_storage_reference_in_curated_copy_is_dropped(self):
+        for unsafe in (
+            "use https://example.com/private.jpg from the bucket",
+            "read premium/mia/private.jpg",
+            r"read C:\private\mia.jpg",
+            "read file:/private/mia.jpg",
+            "read /home/mia/private.jpg",
+            "read ~/private/mia.jpg",
+            "read ../private/mia.jpg",
+            r"read \\server\share\mia.jpg",
+            "use X-Amz-Credential=temporary",
+            "use X-Amz-Signature=temporary",
+        ):
+            with self.subTest(unsafe=unsafe):
+                _, messages = await self._build(
+                    commerce_brief={
+                        "action": "offer_fallback",
+                        "brief": unsafe,
+                    }
+                )
+                system = messages[0]["content"]
+
+                self.assertIn('"curated_copy": ""', system)
+                self.assertNotIn(unsafe, system)
 
     def test_locked_real_persona_contains_no_explicit_vocabulary_examples(self):
         locked = load_persona().to_system_prompt(include_unlocked=False)

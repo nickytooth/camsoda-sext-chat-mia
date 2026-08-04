@@ -1,4 +1,6 @@
 .env
+.env.local
+.env.*.local
 env
 data/
 .claude/
@@ -19,6 +21,9 @@ check_*.py
 .preview-*.log
 .*.publish.lock
 .env.media*.local
+library/media_catalog.local.yaml
+library/media_catalog.private.yaml
+frontend/public/media/
 
 # Frontend (Next.js)
 node_modules/

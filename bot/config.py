@@ -27,8 +27,16 @@ TYLER_ARC_FILE = BASE_DIR / os.getenv("TYLER_ARC_FILE", "library/tyler_arc.yaml"
 # Visual content commerce. The catalog contains metadata and private object
 # keys only; object delivery is handled separately and must entitlement-check
 # before issuing a short-lived URL for the full asset.
-MEDIA_CATALOG_FILE = BASE_DIR / os.getenv(
-    "MEDIA_CATALOG_FILE", "library/media_catalog.yaml"
+_configured_media_catalog = os.getenv("MEDIA_CATALOG_FILE")
+_private_media_catalog = BASE_DIR / ".private-media" / "media_catalog.yaml"
+MEDIA_CATALOG_FILE = (
+    BASE_DIR / _configured_media_catalog
+    if _configured_media_catalog
+    else (
+        _private_media_catalog
+        if _private_media_catalog.exists()
+        else BASE_DIR / "library" / "media_catalog.yaml"
+    )
 )
 MEDIA_PHOTO_PRICE_TOKENS = int(os.getenv("MEDIA_PHOTO_PRICE_TOKENS", "5"))
 MEDIA_VIDEO_PRICE_TOKENS = int(os.getenv("MEDIA_VIDEO_PRICE_TOKENS", "10"))

@@ -116,6 +116,44 @@ class CommerceAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(with_offer, "here's a photo i picked for you")
         fallback.generate.assert_not_awaited()
 
+    async def test_generation_retries_when_offer_copy_changes_the_real_location(self):
+        primary = StubProvider()
+        primary.generate = AsyncMock(
+            return_value="i have a video. one from my bedroom, just for you"
+        )
+        fallback = StubProvider()
+        fallback.generate = AsyncMock(
+            return_value="i have a video from my bathroom, just for you"
+        )
+        persona = Persona({"general": {"name": "Mia", "age": 26}})
+        engine = ChatEngine(
+            persona=persona,
+            nsfw_persona=persona,
+            nsfw_provider=primary,
+            classifier_provider=fallback,
+            fallback_provider=fallback,
+        )
+        prompt = [
+            {"role": "system", "content": "stay in character"},
+            {"role": "user", "content": "show me the video"},
+        ]
+
+        result = await engine._generate_with_fallback(
+            primary,
+            prompt,
+            heat="high",
+            commerce_action="offer_fallback",
+            commerce_media_type="video",
+            commerce_explicitness="nude",
+            commerce_media_description="a synthetic test clip from her bathroom",
+            commerce_media_locations=("bathroom",),
+        )
+
+        self.assertEqual(result, "i have a video from my bathroom, just for you")
+        fallback.generate.assert_awaited_once()
+        correction = fallback.generate.await_args.args[0][0]["content"]
+        self.assertIn("setting from the trusted commerce brief", correction)
+
     def test_batch_number_uses_processed_turns_not_raw_message_lifetime(self):
         self.assertEqual(
             ChatEngine._next_batch_number(
@@ -204,13 +242,13 @@ class CommerceAdapterTests(unittest.IsolatedAsyncioTestCase):
                 brief="customers are around, so offer an older bedroom photo",
                 offer=MediaOffer(
                     offer_id=42,
-                    content_id="mia_bedroom_001",
+                    content_id="fixture_bedroom_photo_001",
                     media_type="photo",
                     price_tokens=5,
                     aspect_ratio=0.75,
                     duration_seconds=None,
                     explicitness="suggestive",
-                    description="an older playful bedroom mirror photo",
+                    description="a synthetic bedroom fixture photo",
                     trigger="direct",
                     action="offer_fallback",
                     request_type="photo",
@@ -231,7 +269,9 @@ class CommerceAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(turn.action, "offer_fallback")
         self.assertEqual(turn.media_offer["offer_id"], 42)
-        self.assertEqual(turn.media_offer["content_id"], "mia_bedroom_001")
+        self.assertEqual(
+            turn.media_offer["content_id"], "fixture_bedroom_photo_001"
+        )
 
     async def test_non_offer_actions_never_attach_a_card(self):
         service = type("Service", (), {})()
@@ -280,6 +320,43 @@ class CommerceAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(turn.action, "none")
         self.assertIsNone(turn.media_offer)
+
+    async def test_offer_description_rejects_storage_paths_and_signed_query_fields(self):
+        for unsafe in (
+            "premium/mia/private.jpg",
+            r"C:\private\mia.jpg",
+            "file:/private/mia.jpg",
+            "/home/mia/private.jpg",
+            "~/private/mia.jpg",
+            "../private/mia.jpg",
+            r"\\server\share\mia.jpg",
+            "X-Amz-Credential=temporary",
+            "X-Amz-Signature=temporary",
+        ):
+            with self.subTest(unsafe=unsafe):
+                service = type("Service", (), {})()
+                invalid = offer_payload()
+                invalid["description"] = unsafe
+                service.plan_commerce_turn = AsyncMock(
+                    return_value={
+                        "action": "offer_current",
+                        "brief": "an invalid offer",
+                        "offer": invalid,
+                    }
+                )
+                engine = make_engine(service)
+
+                with self.assertLogs("bot.chat_engine", level="ERROR"):
+                    turn = await engine._plan_commerce_turn(
+                        9,
+                        "show me a photo",
+                        batch_number=8,
+                        heat="rising",
+                        period="bar_shift",
+                    )
+
+                self.assertEqual(turn.action, "none")
+                self.assertIsNone(turn.media_offer)
 
 
 class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):

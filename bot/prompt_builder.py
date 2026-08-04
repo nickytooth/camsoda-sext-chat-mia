@@ -118,7 +118,12 @@ _COMMERCE_ACTIONS = frozenset(
 )
 
 _URL_OR_STORAGE_REFERENCE = re.compile(
-    r"(?:https?://|s3://|r2://|(?:full|preview|poster)_key\b|cloudflare\b|bucket\b)",
+    r"(?:https?://|s3://|r2://|file:(?://)?|[a-z]:[\\/]|"
+    r"~[\\/]|(?:\.\.[\\/])+|\\\\[^\\/\s]+[\\/]|"
+    r"/(?:home|users|var|tmp|private|opt|srv|mnt|media|etc|root|app|workspace|usr|dev|proc|run)(?:[\\/]|$)|"
+    r"(?:premium|previews|posters)[\\/]|(?:full|preview|poster)_key\b|"
+    r"x-amz-(?:algorithm|credential|date|expires|signedheaders|signature)\b|"
+    r"cloudflare\b|bucket\b)",
     re.IGNORECASE,
 )
 
@@ -163,6 +168,12 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
         return None
 
     copy = _safe_commerce_copy(_commerce_value(brief, "brief", ""))
+    item_description = _safe_commerce_copy(
+        _commerce_value(brief, "offered_item_description", "")
+    )
+    current_context = _safe_commerce_copy(
+        _commerce_value(brief, "current_context", "")
+    )
 
     instructions = {
         "offer_current": (
@@ -191,13 +202,30 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
         ),
     }[action]
 
-    payload = {"action": action, "curated_copy": copy}
+    if action in {"offer_current", "offer_fallback"} and item_description:
+        payload = {
+            "action": action,
+            "offered_item_description": item_description,
+        }
+        if current_context:
+            payload["current_context"] = current_context
+    else:
+        # Legacy mapping callers and non-offer actions still use the single
+        # bounded brief field. Production offers use the separated structure
+        # above so current location cannot be mistaken for file provenance.
+        payload = {"action": action, "curated_copy": copy}
     return (
         "COMMERCE BRIEF (TRUSTED BACKEND ACTION):\n"
         "This is the ONLY visual-media action authorised for this reply. It overrides the "
         "general no-media-claim default, but only to the exact extent stated below.\n"
         f"ACTION_DATA_JSON: {json.dumps(payload, ensure_ascii=False)}\n"
         f"REPLY BEHAVIOR: {instructions}\n"
+        "For an offer, offered_item_description is the authoritative factual metadata for "
+        "the one real item; current_context only explains Mia's situation right now and "
+        "never describes the file's origin. Preserve the item's media type, explicitness, "
+        "capture timing, and setting. Never substitute a different room or location; if "
+        "you mention where the item came from, use only offered_item_description (or the "
+        "legacy curated_copy when that is the only copy field).\n"
         "Never mention storage, URLs, links, internal IDs, the catalog, or token price; the "
         "media card UI handles the item and price. Never negotiate or change the price."
     )

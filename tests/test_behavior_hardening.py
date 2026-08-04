@@ -176,6 +176,115 @@ class OutputBoundaryTests(unittest.TestCase):
         )
         self.assertTrue(explicit_photo.ok, explicit_photo.reasons)
 
+    def test_offer_claim_cannot_change_the_catalog_location(self):
+        offer = {
+            "heat": "high",
+            "commerce_action": "offer_fallback",
+            "commerce_media_type": "video",
+            "commerce_explicitness": "nude",
+            "commerce_media_description": "a synthetic test clip from her bathroom",
+            "commerce_media_locations": ("bathroom",),
+        }
+
+        wrong_room = validate_mia_reply(
+            "i have a video. one from my bedroom, when no one else was around",
+            **offer,
+        )
+        self.assertFalse(wrong_room.ok)
+        self.assertIn("media_offer_mismatch", wrong_room.reasons)
+
+        correct_room = validate_mia_reply(
+            "i have a video. one from my bathroom, when no one else was around",
+            **offer,
+        )
+        self.assertTrue(correct_room.ok, correct_room.reasons)
+
+        contextual_fallback = validate_mia_reply(
+            "i can't film a video in the bar right now, but here's a video from my bathroom",
+            **offer,
+        )
+        self.assertTrue(contextual_fallback.ok, contextual_fallback.reasons)
+
+        generic_home = validate_mia_reply(
+            "i have a video from home that i picked for you",
+            **offer,
+        )
+        self.assertTrue(generic_home.ok, generic_home.reasons)
+
+        wrong_current_origin = validate_mia_reply(
+            "i have a video from the bar that i picked for you",
+            **offer,
+        )
+        self.assertFalse(wrong_current_origin.ok)
+        self.assertIn("media_offer_mismatch", wrong_current_origin.reasons)
+
+        unrelated_location = validate_mia_reply(
+            "Tyler is in the bedroom, but i have a video from my bathroom for you",
+            **offer,
+        )
+        self.assertTrue(unrelated_location.ok, unrelated_location.reasons)
+
+        locationless = validate_mia_reply(
+            "i have a video i picked just for you",
+            **offer,
+        )
+        self.assertTrue(locationless.ok, locationless.reasons)
+
+        current_bar_item = validate_mia_reply(
+            "here's a photo from the bar that i picked for you",
+            heat="high",
+            commerce_action="offer_current",
+            commerce_media_type="photo",
+            commerce_explicitness="suggestive",
+            commerce_media_description="a teasing photo from behind the bar",
+            commerce_media_locations=("bar", "bathroom"),
+        )
+        self.assertTrue(current_bar_item.ok, current_bar_item.reasons)
+
+    def test_location_guard_covers_natural_card_shapes_without_false_context_links(self):
+        bathroom_offer = {
+            "heat": "high",
+            "commerce_action": "offer_fallback",
+            "commerce_media_type": "video",
+            "commerce_explicitness": "nude",
+            "commerce_media_description": "a synthetic test clip from her bathroom",
+            "commerce_media_locations": ("bathroom",),
+        }
+
+        for text in (
+            "here's a bedroom video",
+            "this video is from my bedroom",
+            "this one's from my bedroom",
+            "i made this in my bedroom",
+            "i can't wait, i have a video from my bedroom",
+            "Tyler can't see it, but i have a video from my bedroom",
+        ):
+            with self.subTest(text=text):
+                unauthorized = validate_mia_reply(text, heat="high")
+                self.assertFalse(unauthorized.ok)
+                self.assertIn("unauthorized_media_claim", unauthorized.reasons)
+
+                wrong_item = validate_mia_reply(text, **bathroom_offer)
+                self.assertFalse(wrong_item.ok)
+                self.assertIn("media_offer_mismatch", wrong_item.reasons)
+
+        for text in (
+            "i have a video for you, but i'm at work right now",
+            "i have a video for you. i'm at the bar",
+            "i have a video for you to watch in bed",
+            "i can't film a video in the bar right now, but here's a video from my bathroom",
+            "i can't currently film a video in the bar, but here's a video from my bathroom",
+            "i can't safely film a video in the bar, but here's a video from my bathroom",
+            "i can't film a quick video in the bar, but here's a video from my bathroom",
+            "i can't film a new nude video in the bar, but here's a video from my bathroom",
+            "this video is from my bathroom",
+            "this one's from my bathroom",
+            "i made this in my bathroom",
+        ):
+            with self.subTest(text=text):
+                result = validate_mia_reply(text, **bathroom_offer)
+                self.assertTrue(result.ok, result.reasons)
+
     def test_media_references_and_user_requests_are_not_false_positives(self):
         for text in (
             "that photo you showed me was cute",
