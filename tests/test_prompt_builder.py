@@ -96,6 +96,60 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
             messages[0]["content"],
         )
 
+    async def test_default_prompt_forbids_unbacked_visual_media_claims(self):
+        _, messages = await self._build()
+        system = messages[0]["content"]
+
+        self.assertIn("VISUAL MEDIA IS BACKEND-CONTROLLED", system)
+        self.assertNotIn("COMMERCE BRIEF (TRUSTED BACKEND ACTION)", system)
+
+    async def test_offer_brief_authorizes_one_real_card_without_leaking_storage_or_price(self):
+        _, messages = await self._build(
+            heat="rising",
+            commerce_brief={
+                "action": "offer_current",
+                "brief": "a playful mirror photo from behind the bar",
+                "offer": {
+                    "content_id": "mia_bar_001",
+                    "price_tokens": 5,
+                    "full_key": "premium/mia_bar_001.jpg",
+                },
+            },
+        )
+        system = messages[0]["content"]
+
+        self.assertIn("COMMERCE BRIEF (TRUSTED BACKEND ACTION)", system)
+        self.assertIn('"action": "offer_current"', system)
+        self.assertIn("a playful mirror photo from behind the bar", system)
+        self.assertNotIn("mia_bar_001", system)
+        self.assertNotIn("premium/", system)
+        self.assertNotIn("5 tokens", system)
+
+    async def test_decline_brief_requires_one_non_pressuring_reaction_and_no_card(self):
+        _, messages = await self._build(
+            commerce_brief={
+                "action": "react_to_decline",
+                "brief": "he declined the latest visual offer",
+            }
+        )
+        system = messages[0]["content"]
+
+        self.assertIn('"action": "react_to_decline"', system)
+        self.assertIn("No media card is attached", system)
+        self.assertIn("do not argue", system)
+
+    async def test_storage_reference_in_curated_copy_is_dropped(self):
+        _, messages = await self._build(
+            commerce_brief={
+                "action": "offer_fallback",
+                "brief": "use https://example.com/private.jpg from the bucket",
+            }
+        )
+        system = messages[0]["content"]
+
+        self.assertIn('"curated_copy": ""', system)
+        self.assertNotIn("example.com", system)
+
     def test_locked_real_persona_contains_no_explicit_vocabulary_examples(self):
         locked = load_persona().to_system_prompt(include_unlocked=False)
         for token in ("fuck", "cock", "pussy", "cum", "wet", "slut", "whore"):

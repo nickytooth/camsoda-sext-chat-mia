@@ -1,4 +1,6 @@
 import json
+import re
+from collections.abc import Mapping
 
 from bot.persona import Persona
 from bot.time_context import get_time_prompt
@@ -94,15 +96,111 @@ _GLOBAL_GUARDRAILS = (
     "support request, condemnation, news, or education, PAUSE the flirting. Never "
     "eroticize it or treat it as roleplay. Respond briefly and humanly with empathy, "
     "without interrogating him; let him choose whether to continue the topic.\n"
-    "- You keep everything in WORDS right now. You do NOT send photos, pics, videos, "
-    "or selfies, you never claim you just sent one, and you never tell him to check his "
-    "phone. If he asks for a pic, or you feel like showing off, keep it verbal AND in the "
-    "current register: if things are already sexual, describe yourself in filthy detail; "
-    "if they're not, tease instead ('you haven't earned it', 'soon babe') without going "
-    "graphic. Never actually send anything and never say that you did. NEVER break character "
-    "with technical excuses like 'I can't send photos' or 'I don't have a camera' — you're "
-    "not refusing, you're just keeping him wanting and making him wait."
+    "- VISUAL MEDIA IS BACKEND-CONTROLLED. You may say that you are offering a photo or "
+    "video ONLY when this prompt contains a trusted COMMERCE BRIEF whose action is "
+    "offer_current or offer_fallback. That action is accompanied by a real media card. "
+    "Without one of those actions, never claim you sent, attached, posted, or are currently "
+    "selling a file. Never invent a photo/video, price, discount, token balance, content ID, "
+    "link, URL, bucket, upload, purchase result, or unlock result. Never tell him to check a "
+    "link or his phone. Stay in character; do not give technical excuses."
 )
+
+
+_COMMERCE_ACTIONS = frozenset(
+    {
+        "offer_current",
+        "offer_fallback",
+        "react_to_decline",
+        "ask_permission_again",
+        "acknowledge_unlock",
+        "none",
+    }
+)
+
+_URL_OR_STORAGE_REFERENCE = re.compile(
+    r"(?:https?://|s3://|r2://|(?:full|preview|poster)_key\b|cloudflare\b|bucket\b)",
+    re.IGNORECASE,
+)
+
+
+def _commerce_value(brief: object, key: str, default: object = None) -> object:
+    if isinstance(brief, Mapping):
+        return brief.get(key, default)
+    return getattr(brief, key, default)
+
+
+def _commerce_action(brief: object | None) -> str:
+    """Return a validated backend commerce action.
+
+    Enum values from ``bot.media_commerce`` and plain strings are both accepted
+    so the prompt builder stays decoupled from the catalog/storage layer.
+    """
+    if brief is None:
+        return "none"
+    value = _commerce_value(brief, "action", "none")
+    value = getattr(value, "value", value)
+    action = str(value)
+    return action if action in _COMMERCE_ACTIONS else "none"
+
+
+def _safe_commerce_copy(value: object, *, limit: int = 600) -> str:
+    """Bound trusted copy and reject accidental storage/link disclosure."""
+    text = " ".join(str(value or "").split())[:limit]
+    if _URL_OR_STORAGE_REFERENCE.search(text):
+        return ""
+    return text
+
+
+def _trusted_commerce_block(brief: object | None) -> str | None:
+    """Render the single server-authorised commerce action for this reply.
+
+    The LLM never receives catalog keys, URLs, prices, or the catalog itself.
+    It receives only one bounded piece of curated presentation copy plus an
+    action with precise claims it is allowed to make.
+    """
+    action = _commerce_action(brief)
+    if action == "none":
+        return None
+
+    copy = _safe_commerce_copy(_commerce_value(brief, "brief", ""))
+
+    instructions = {
+        "offer_current": (
+            "A real locked media card WILL be attached to this reply. Introduce it as a "
+            "natural, teasing offer that fits what he asked for. The curated copy may be "
+            "presented as current. Do not say it is already unlocked or paid for."
+        ),
+        "offer_fallback": (
+            "A real locked alternative media card WILL be attached. Briefly explain the "
+            "current situation in character, then pivot naturally to the curated older or "
+            "different-location item. Do not pretend the alternative was captured right now."
+        ),
+        "react_to_decline": (
+            "No media card is attached. Accept his no immediately. React only once with mild "
+            "surprise, disappointment, or a slightly sad note in character; do not argue, "
+            "guilt him, repeat the offer, or ask again in this reply."
+        ),
+        "ask_permission_again": (
+            "No media card is attached. Softly ask whether he wants to see you now. Do not "
+            "claim anything was sent and do not announce a price. A card may be offered only "
+            "after he answers positively on a later turn."
+        ),
+        "acknowledge_unlock": (
+            "No new media card is attached. React naturally to the confirmed unlock without "
+            "claiming a second file was sent and without discussing payment mechanics."
+        ),
+    }[action]
+
+    payload = {"action": action, "curated_copy": copy}
+    return (
+        "COMMERCE BRIEF (TRUSTED BACKEND ACTION):\n"
+        "This is the ONLY visual-media action authorised for this reply. It overrides the "
+        "general no-media-claim default, but only to the exact extent stated below.\n"
+        f"ACTION_DATA_JSON: {json.dumps(payload, ensure_ascii=False)}\n"
+        f"REPLY BEHAVIOR: {instructions}\n"
+        "Never mention storage, URLs, links, internal IDs, the catalog, or token price; the "
+        "media card UI handles the item and price. Never negotiate or change the price."
+    )
 
 
 def _normalise_display_name(value: str) -> str:
@@ -144,6 +242,7 @@ async def build_prompt(
     scene_hint: str | None = None,
     arc_note: str | None = None,
     heat: str | None = None,
+    commerce_brief: object | None = None,
 ) -> list[dict]:
     # The explicit-only persona layers (SEX block, kinks, sexual memories)
     # render only at high heat. Medium is a cooling/ambiguous turn whose
@@ -318,6 +417,12 @@ async def build_prompt(
     # Soft-push hint (injected by engagement system)
     if push_hint:
         system_parts.append(f"IMPORTANT FOR THIS REPLY: {push_hint}")
+
+    # One trusted, backend-selected commerce action. The catalog and all media
+    # access details stay outside the model context.
+    commerce_block = _trusted_commerce_block(commerce_brief)
+    if commerce_block:
+        system_parts.append(commerce_block)
 
     # Global guardrails (both modes): real woman, English-only, not an assistant.
     system_parts.append(_GLOBAL_GUARDRAILS)

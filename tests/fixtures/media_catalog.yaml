@@ -1,0 +1,78 @@
+# Synthetic catalog metadata used by unit tests only. No matching media bytes
+# are committed or served by the application.
+version: 1
+items:
+  - id: mia_bar_001
+    type: photo
+    status: active
+    full_key: premium/mia_bar_001.png
+    preview_key: previews/mia_bar_001.webp
+    poster_key: null
+    mime_type: image/png
+    aspect_ratio: 0.75
+    duration_seconds: null
+    sha256: "1111111111111111111111111111111111111111111111111111111111111111"
+    explicitness: suggestive
+    min_heat: rising
+    presentation:
+      mode: current_compatible
+      periods: [bar_shift]
+      current_description: a quick teasing bathroom selfie during her bar shift
+      past_description: a teasing bathroom selfie from one of her bar shifts
+    tags:
+      location: [bar, bathroom]
+      body_focus: [face, boobs, full_body]
+      activity: [selfie, posing]
+      outfit: [casual]
+      vibe: [teasing, playful, risky]
+      capture: [selfie, mirror, full_body]
+
+  - id: mia_home_pose_001
+    type: photo
+    status: active
+    full_key: premium/mia_home_pose_001.png
+    preview_key: previews/mia_home_pose_001.webp
+    poster_key: null
+    mime_type: image/png
+    aspect_ratio: 0.75
+    duration_seconds: null
+    sha256: "2222222222222222222222222222222222222222222222222222222222222222"
+    explicitness: tease
+    min_heat: low
+    presentation:
+      mode: current_compatible
+      periods: [morning_home, prework_home, evening_pregame, weekend_hungover, weekend_home_tyler, weekend_getting_ready]
+      current_description: a playful full-body photo from home
+      past_description: a playful full-body photo she took at home
+    tags:
+      location: [home, bedroom]
+      body_focus: [face, full_body]
+      activity: [posing]
+      outfit: [casual]
+      vibe: [playful, teasing]
+      capture: [full_body, tripod]
+
+  - id: mia_club_clip_001
+    type: video
+    status: active
+    full_key: premium/mia_club_clip_001.mp4
+    preview_key: previews/mia_club_clip_001.webp
+    poster_key: posters/mia_club_clip_001.webp
+    mime_type: video/mp4
+    aspect_ratio: 0.5625
+    duration_seconds: 10.0
+    sha256: "3333333333333333333333333333333333333333333333333333333333333333"
+    explicitness: suggestive
+    min_heat: rising
+    presentation:
+      mode: current_compatible
+      periods: [club_night, weekend_club_night]
+      current_description: a short playful clip from the club
+      past_description: a short playful clip from one of her club nights
+    tags:
+      location: [club]
+      body_focus: [face, boobs, full_body]
+      activity: [posing, dancing]
+      outfit: [casual]
+      vibe: [playful, teasing, risky]
+      capture: [selfie, full_body]

@@ -95,6 +95,86 @@ class AuthoredCardConsentTests(unittest.TestCase):
 
 
 class OutputBoundaryTests(unittest.TestCase):
+    def test_visual_file_claims_require_a_real_offer_action(self):
+        claims = (
+            "i sent you a photo just now",
+            "i've attached a photo for you",
+            "i'm sending you a video now",
+            "i can show you a pic",
+            "i got a selfie from last night",
+            "i've got a video i saved for you",
+            "here's a selfie i picked for you",
+            "want to see my clip?",
+            "open this file babe",
+            "the picture i took for you is right here",
+        )
+        for text in claims:
+            with self.subTest(text=text):
+                unauthorized = validate_mia_reply(text, heat="high")
+                self.assertFalse(unauthorized.ok)
+                self.assertIn("unauthorized_media_claim", unauthorized.reasons)
+
+                for action in ("offer_current", "offer_fallback"):
+                    media_type = (
+                        "video"
+                        if re.search(r"\b(?:video|clip)\b", text, re.IGNORECASE)
+                        else "photo"
+                    )
+                    authorized = validate_mia_reply(
+                        text,
+                        heat="high",
+                        commerce_action=action,
+                        commerce_media_type=media_type,
+                        commerce_explicitness="suggestive",
+                    )
+                    self.assertTrue(authorized.ok, (text, action, authorized.reasons))
+
+    def test_offer_claim_must_match_single_backend_item_and_never_quote_price(self):
+        for text in ("here's a nude", "i sent you content"):
+            with self.subTest(text=text):
+                result = validate_mia_reply(text, heat="high")
+                self.assertFalse(result.ok)
+                self.assertIn("unauthorized_media_claim", result.reasons)
+
+        offer = {
+            "heat": "high",
+            "commerce_action": "offer_current",
+            "commerce_media_type": "photo",
+            "commerce_explicitness": "suggestive",
+        }
+        for text, reason in (
+            ("here's a video i picked for you", "media_offer_mismatch"),
+            ("here are two photos i picked for you", "media_offer_mismatch"),
+            ("here's a nude i picked for you", "media_offer_mismatch"),
+            ("i discounted this to 2 tokens", "commerce_price_claim"),
+        ):
+            with self.subTest(text=text):
+                result = validate_mia_reply(text, **offer)
+                self.assertFalse(result.ok)
+                self.assertIn(reason, result.reasons)
+
+        nude_photo = validate_mia_reply(
+            "here's a nude i picked for you",
+            heat="high",
+            commerce_action="offer_current",
+            commerce_media_type="photo",
+            commerce_explicitness="nude",
+        )
+        self.assertTrue(nude_photo.ok, nude_photo.reasons)
+
+    def test_media_references_and_user_requests_are_not_false_positives(self):
+        for text in (
+            "that photo you showed me was cute",
+            "i love concert photography",
+            "why... i thought you'd like the photo",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(validate_mia_reply(text, heat="high").ok)
+
+        self.assertTrue(
+            validate_user_suggestion("send me a photo", heat="high").ok
+        )
+
     def test_unicode_apostrophes_do_not_bypass_output_checks(self):
         cases = (
             ("I\u2019m an AI", "high", "ai_disclosure"),

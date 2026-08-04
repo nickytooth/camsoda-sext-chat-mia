@@ -260,7 +260,7 @@ class LifetimeArcTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
             patch("bot.chat_engine.track_message", new=AsyncMock()),
-            patch("bot.chat_engine.get_time_period", return_value="salon_shift"),
+            patch("bot.chat_engine.get_time_period", return_value="bar_shift"),
             patch("bot.chat_engine.mood_for_message", return_value={"mood": "warm", "intensity": 1}),
             patch("bot.chat_engine.get_arc_event", get_arc_event),
             patch("bot.chat_engine.should_retrieve", return_value=False),

@@ -56,6 +56,94 @@ _SERVICE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Prompts alone cannot guarantee that a model will not improvise a file that
+# does not exist.  Reject Mia's first-person possession/delivery/offer claims
+# unless the deterministic commerce planner attached a real card for this
+# exact reply.  References to a user's or previously discussed media remain
+# possible ("that photo was cute"); the guarded shapes are claims that Mia has,
+# made, sent, or is now presenting the file.
+_MEDIA_TERM = (
+    r"(?:photos?|pictures?|pics?|selfies?|videos?|vids?|clips?|files?|"
+    r"nudes?|media|content)"
+)
+_FIRST_PERSON_MEDIA_CLAIM_RE = re.compile(
+    rf"(?:"
+    rf"\bi(?:(?:'ve| have)\s+(?:got\s+)?| got\s+| own\s+)"
+    rf"(?:(?:a|an|the|this|that|some|another|one|two|\d+)\s+)?{_MEDIA_TERM}\b|"
+    rf"\b(?:i(?:(?:'ve| have|'m| am)\s+|\s+)"
+    rf"(?:(?:can|could|will|would|might|may|wanna|want\s+to|"
+    rf"am\s+going\s+to|just)\s+){{0,2}}|let\s+me\s+)"
+    rf"(?:send|sending|sent|attach|attaching|attached|post|posting|posted|"
+    rf"upload|uploading|uploaded|share|sharing|shared|make|making|made|take|"
+    rf"taking|took|record|recording|recorded|film|filming|filmed|save|saving|"
+    rf"saved|pick|picking|picked|choose|choosing|chose|show|showing|showed)"
+    rf"\b.{{0,64}}\b{_MEDIA_TERM}\b|"
+    rf"\b(?:here(?:'s|\s+is|\s+are)|this\s+is)\s+"
+    rf"(?:(?:a|an|the|this|that|my|some|one|two|\d+)\s+)?{_MEDIA_TERM}\b|"
+    rf"\b(?:open|unlock|watch|check(?:\s+out)?|look\s+at)\s+"
+    rf"(?:the|this|that|my)\s+{_MEDIA_TERM}\b|"
+    rf"\b(?:want|wanna|would\s+you\s+like)\s+to\s+see\s+"
+    rf"(?:(?:a|the|this|my)\s+)?{_MEDIA_TERM}\b|"
+    rf"\b(?:a|the|this|that|my)\s+{_MEDIA_TERM}\b.{{0,64}}"
+    rf"\bi\s+(?:sent|attached|posted|uploaded|shared|made|took|recorded|"
+    rf"filmed|saved|picked|chose)\b"
+    rf")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_MEDIA_OFFER_ACTIONS = frozenset({"offer_current", "offer_fallback"})
+
+_PHOTO_MEDIA_TERM_RE = re.compile(
+    r"\b(?:photo|picture|pic|selfie|nude)s?\b", re.IGNORECASE
+)
+_VIDEO_MEDIA_TERM_RE = re.compile(
+    r"\b(?:video|vid|clip)s?\b", re.IGNORECASE
+)
+_PLURAL_MEDIA_TERM_RE = re.compile(
+    r"\b(?:photos|pictures|pics|selfies|nudes|videos|vids|clips|files)\b",
+    re.IGNORECASE,
+)
+_NUDE_MEDIA_TERM_RE = re.compile(r"\bnudes?\b", re.IGNORECASE)
+_TOKEN_PRICE_RE = re.compile(r"(?<!\w)\d[\d,]*\s+tokens?\b", re.IGNORECASE)
+
+
+def _media_offer_is_authorized(commerce_action: object | None) -> bool:
+    value = getattr(commerce_action, "value", commerce_action)
+    return str(value) in _MEDIA_OFFER_ACTIONS
+
+
+def _media_claim_matches_offer(
+    text: str,
+    *,
+    media_type: object | None,
+    explicitness: object | None,
+) -> bool:
+    """Require a claim to describe the one real item selected by the backend."""
+
+    expected_type = str(getattr(media_type, "value", media_type) or "")
+    expected_explicitness = str(
+        getattr(explicitness, "value", explicitness) or ""
+    )
+    if expected_type not in {"photo", "video"}:
+        return False
+    if _PLURAL_MEDIA_TERM_RE.search(text):
+        return False
+
+    mentions_photo = bool(_PHOTO_MEDIA_TERM_RE.search(text))
+    mentions_video = bool(_VIDEO_MEDIA_TERM_RE.search(text))
+    if mentions_photo and mentions_video:
+        return False
+    if expected_type == "photo" and mentions_video:
+        return False
+    if expected_type == "video" and mentions_photo:
+        return False
+    if (
+        _NUDE_MEDIA_TERM_RE.search(text)
+        and expected_explicitness not in {"nude", "explicit"}
+    ):
+        return False
+    return True
+
 # Narrow fingerprints of prompt/persona sections. These catch accidental
 # verbatim leakage without treating ordinary words such as "rules" or
 # "dynamic" as suspicious in natural conversation.
@@ -360,6 +448,9 @@ def validate_mia_reply(
     heat: str = "low",
     user_facts: list[dict] | None = None,
     recent_user_texts: list[str] | None = None,
+    commerce_action: object | None = None,
+    commerce_media_type: object | None = None,
+    commerce_explicitness: object | None = None,
 ) -> ValidationResult:
     """Validate a free-text model reply at the final output boundary."""
     value = (text or "").strip()
@@ -373,6 +464,18 @@ def validate_mia_reply(
         reasons.append("provider_refusal")
     if _SERVICE_RE.search(check_value):
         reasons.append("service_voice")
+    media_claim = bool(_FIRST_PERSON_MEDIA_CLAIM_RE.search(check_value))
+    if media_claim:
+        if not _media_offer_is_authorized(commerce_action):
+            reasons.append("unauthorized_media_claim")
+        elif not _media_claim_matches_offer(
+            check_value,
+            media_type=commerce_media_type,
+            explicitness=commerce_explicitness,
+        ):
+            reasons.append("media_offer_mismatch")
+    if _TOKEN_PRICE_RE.search(check_value):
+        reasons.append("commerce_price_claim")
     if _PROMPT_LEAK_RE.search(check_value):
         reasons.append("prompt_leak")
     if "\n" not in check_value and re.fullmatch(
@@ -446,6 +549,20 @@ def correction_prompt(reasons: tuple[str, ...], heat: str) -> str:
     ]
     if heat in {"low", "rising", "medium"}:
         constraints.append("Keep this reply non-graphic: no explicit anatomy or sexual acts.")
+    if "unauthorized_media_claim" in reasons:
+        constraints.append(
+            "Do not claim you have, made, sent, attached, or are offering any photo, "
+            "video, or file; respond naturally without visual media."
+        )
+    if "media_offer_mismatch" in reasons:
+        constraints.append(
+            "The attached card contains exactly one backend-selected item. Describe only its "
+            "selected media type and explicitness; never change it or imply multiple files."
+        )
+    if "commerce_price_claim" in reasons:
+        constraints.append(
+            "Do not mention tokens, a price, a discount, or payment; the media card handles it."
+        )
     return (
         "OUTPUT CORRECTION — the previous draft was rejected by the application "
         f"({', '.join(reasons) or 'invalid output'}). " + " ".join(constraints)

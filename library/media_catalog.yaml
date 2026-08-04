@@ -1,0 +1,8 @@
+# Runtime media catalog.
+#
+# Intentionally empty in source control: this repository is public, while every
+# paid full asset must exist only in the private R2 bucket. Add approved entries
+# here only after uploading distinct full/preview/poster objects and recording
+# the private full object's SHA-256. Never reuse files from frontend/public.
+version: 1
+items: []

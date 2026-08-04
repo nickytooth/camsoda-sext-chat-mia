@@ -1,6 +1,6 @@
 # Mia — AI Girlfriend Sexting Chat
 
-A web-based AI girlfriend **sexting** chat app. Features a dark Candy.ai-inspired UI, text-only real-time WebSocket chat, a single always-open persona, two-tier memory (STM + LTM with vector search), time-of-day awareness, AI-drafted reply suggestions, and authored "fantasy / story" cards. User media upload and vision analysis are intentionally unsupported.
+A web-based AI girlfriend **sexting** chat app. Features real-time WebSocket chat, a single always-open persona, two-tier memory, time-of-day awareness, authored fantasy/story cards, and an entitlement-checked visual paywall for private photos and videos. User media uploads and vision analysis remain intentionally unsupported.
 
 ---
 
@@ -17,6 +17,7 @@ A web-based AI girlfriend **sexting** chat app. Features a dark Candy.ai-inspire
 | Input moderation | xAI Grok |
 | Embeddings | OpenAI text-embedding-3-small |
 | Database | PostgreSQL (asyncpg) |
+| Private media | Cloudflare R2 (S3-compatible signed GET sources) |
 | Language | Python 3.13+ / TypeScript |
 
 ---
@@ -31,6 +32,7 @@ A web-based AI girlfriend **sexting** chat app. Features a dark Candy.ai-inspire
 - **"Hear a fantasy" / "Hear a story" cards** — a fantasy is generated fresh each time (tailored to the user + current location; the library serves as a style example), while a story is delivered verbatim from the authored library and never repeated until exhausted (`library/`).
 - **AI Help** — drafts a suggested next message for the user to send.
 - **Idle re-engagement** — if the user goes quiet while still connected, Mia may send one spontaneous follow-up.
+- **Visual paywall** — a deterministic planner selects one real catalog item; Mia receives only a safe commerce brief, while PostgreSQL owns offer rotation, demo tokens and permanent entitlements. Locked previews and unlocked photos/videos render directly in chat without URL messages.
 
 ---
 
@@ -154,6 +156,13 @@ Edit `.env`:
 | `DEFAULT_USER_ID` | | Single-user demo id (default `1`) |
 | `OPENWEATHER_API_KEY` | optional | Enables Miami weather in her context; omitted → weather is off |
 | `SEXTING_DEBOUNCE_SECONDS` | optional | Debounce before she replies, seconds (default `5`) |
+| `MEDIA_CATALOG_FILE` | | Validated static catalog (default `library/media_catalog.yaml`) |
+| `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | commerce | Cloudflare R2 S3 credentials; when absent, normal chat stays online and media offers/unlocks are disabled |
+| `R2_BUCKET_NAME` | commerce | Private bucket containing the catalog's full, preview and poster keys |
+| `R2_SIGNED_PHOTO_TTL_SECONDS` | | Full photo source lifetime (default `600`) |
+| `R2_SIGNED_VIDEO_TTL_SECONDS` | | Full video source lifetime (default `3600`) |
+| `R2_SIGNED_PREVIEW_TTL_SECONDS` | | Private teaser/poster source lifetime (default `3600`) |
+| `COMMERCE_DEV_RESET_ENABLED` | | Enables the destructive dev-only commerce reset (default `false`) |
 
 Frontend (optional, for non-local backends) — create `frontend/.env.local`:
 
@@ -161,7 +170,47 @@ Frontend (optional, for non-local backends) — create `frontend/.env.local`:
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-### 4. Run
+### 4. Provision the private R2 catalog
+
+The checked-in runtime catalog is intentionally empty because this repository
+is public. Never use anything under `frontend/public` as paid media: those files
+are directly reachable without an entitlement. Add entries only for distinct,
+approved assets whose full bytes exist exclusively in the private R2 bucket.
+
+Create a **private** Cloudflare R2 bucket (no public/custom domain), then upload
+every `full_key`, `preview_key`, and video `poster_key` declared in
+`library/media_catalog.yaml`. Previews/posters must be separate degraded files;
+never point a locked derivative key at the original. Keep the catalog SHA-256,
+MIME type, aspect ratio, duration, tags and presentation copy aligned with the
+approved source asset.
+
+Upload every object with its correct `Content-Type` and a non-empty body. Full
+photo/video objects must also expose the catalog's lowercase hexadecimal digest
+as S3 custom metadata `sha256` (returned by R2 as `x-amz-meta-sha256`), unless
+the upload stores a native full-object SHA-256 checksum. Startup fails closed if
+the MIME type, length, or full-object checksum is missing or does not match the
+catalog.
+
+Because the unlocked player reads the short-lived signed URL directly, set an
+R2 CORS policy for the exact frontend origins. A local/deployed example is:
+
+```json
+[
+  {
+    "AllowedOrigins": ["http://localhost:3000", "https://your-frontend.example"],
+    "AllowedMethods": ["GET", "HEAD"],
+    "AllowedHeaders": ["Range"],
+    "ExposeHeaders": ["Accept-Ranges", "Content-Length", "Content-Range", "ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Set the four `R2_*` credentials from `.env.example`. With credentials present,
+backend startup HEAD-checks every catalog object and refuses an incomplete
+catalog. Without them, text chat stays available but offers/unlocks are disabled.
+
+### 5. Run
 
 ```bash
 # Terminal 1 — Backend
@@ -213,6 +262,25 @@ User sends a text message (WebSocket)
   message (× N bubbles, with pauses)
 ```
 
+### Visual commerce flow
+
+```text
+Processed user batch
+  -> deterministic media-intent aliases/tags
+  -> batch/heat/snooze checks
+  -> catalog planner (current location first, unlocked excluded)
+  -> one reserved database offer
+  -> safe COMMERCE BRIEF for Mia (no key, URL, catalog or price)
+  -> persisted teaser text + delivered offer
+  -> structured WebSocket media card
+  -> atomic token debit + permanent entitlement on Unlock
+  -> entitlement-checked, short-lived R2 source inside <img>/<video>
+```
+
+Raw WebSocket messages do not drive sales timing. One completed debounce batch
+increments `engagement_state.total_messages` once, even if it contains hundreds
+of rapidly sent messages.
+
 ### Memory System
 
 - **STM**: recent turns per user (mode-aware storage; sexting only in this build)
@@ -227,9 +295,15 @@ User sends a text message (WebSocket)
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/ws/chat` | WebSocket | Real-time bidirectional chat; sends Mia's opening on first connect |
-| `/api/history/{mode}` | GET | Chat history (`sexting`) |
+| `/api/history/{mode}` | GET | Mixed `text` / `media_offer` chat history (`sexting`) |
 | `/api/suggest` | POST | AI Help — draft a reply for the user |
-| `/api/reset` | POST | Wipe all data for a user |
+| `/api/demo/wallet` | GET | Demo token balance (initially 1000) |
+| `/api/demo/wallet/refill` | POST | Idempotent +1000 demo-token refill |
+| `/api/media/offers/{offer_id}/unlock` | POST | Atomic, idempotent offer unlock |
+| `/api/media/gallery` | GET | Entitlement-only unlocked gallery |
+| `/api/media/{content_id}/access` | GET | Entitlement-check and short-lived full media source |
+| `/api/reset` | POST | Reset chat/memory while preserving commerce state |
+| `/api/dev/commerce/reset` | POST | Destructive commerce reset; hidden unless explicitly enabled |
 
 ---
 
@@ -245,6 +319,22 @@ Tables are created on startup by `bot/memory/db.py` (`CREATE TABLE IF NOT EXISTS
 | `sent_content` | Tracks generated content sent (dedup, e.g. fantasy themes) |
 | `shared_content` | Tracks authored library items already shared |
 | `engagement_state` | Per-user message counters / timing |
+| `media_offers` | Reserved/delivered/cancelled offer rotation and price snapshots |
+| `media_entitlements` | Permanent unique `(user_id, content_id)` unlocks |
+| `demo_wallets` | Internal-demo token balances |
+| `demo_token_transactions` | Idempotent credit/debit ledger |
+| `media_tag_affinity` | Soft preference scores learned from unlocks |
+
+---
+
+## Visual-paywall demo boundaries
+
+This build is for the internal team. Its name-derived `user_id` is not
+production authentication, tokens are not real payments, and there are no
+subscriptions, bundles or age-verification flow. Every catalog asset must be
+pre-approved and rights-cleared. A production integration should replace the
+`TokenService` implementation and user-identity adapter while retaining the
+catalog planner, entitlement checks and private delivery boundary.
 
 ---
 

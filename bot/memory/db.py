@@ -85,6 +85,14 @@ ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS active_days INTEGER DEFAUL
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_active_date TEXT;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_arc_id TEXT;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS lifetime_user_messages BIGINT NOT NULL DEFAULT 0;
+-- Visual-commerce pacing is deliberately based on total_messages, which is
+-- incremented once per processed debounce batch. Raw lifetime_user_messages
+-- must never be used for these fields.
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS sales_snooze_until_batch BIGINT;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS sales_reask_pending BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS sales_reask_asked_at_batch BIGINT;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_proactive_media_batch BIGINT;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_generic_media_type TEXT;
 -- Safe one-time/backward-compatible lower-bound backfill. Existing deployments
 -- may already have summarized old message rows, so retain the larger historic
 -- batch counter; otherwise use the exact user rows that are still available.
@@ -110,6 +118,58 @@ CREATE TABLE IF NOT EXISTS shared_content (
     item_id TEXT NOT NULL,
     shared_at DOUBLE PRECISION NOT NULL
 );
+CREATE TABLE IF NOT EXISTS demo_wallets (
+    user_id BIGINT PRIMARY KEY,
+    balance INTEGER NOT NULL CHECK (balance >= 0),
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL
+);
+CREATE TABLE IF NOT EXISTS media_offers (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    content_id TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    action TEXT NOT NULL,
+    request_type TEXT,
+    description TEXT,
+    batch_number BIGINT NOT NULL,
+    price_tokens INTEGER NOT NULL CHECK (price_tokens > 0),
+    status TEXT NOT NULL DEFAULT 'reserved'
+        CHECK (status IN ('reserved', 'delivered', 'cancelled')),
+    created_at DOUBLE PRECISION NOT NULL,
+    offered_at DOUBLE PRECISION
+);
+ALTER TABLE media_offers ADD COLUMN IF NOT EXISTS description TEXT;
+CREATE TABLE IF NOT EXISTS demo_token_transactions (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('initial_credit', 'refill', 'unlock')),
+    amount_tokens INTEGER NOT NULL,
+    balance_after INTEGER NOT NULL CHECK (balance_after >= 0),
+    offer_id BIGINT,
+    content_id TEXT,
+    created_at DOUBLE PRECISION NOT NULL,
+    UNIQUE (user_id, idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS media_entitlements (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    content_id TEXT NOT NULL,
+    source_offer_id BIGINT NOT NULL,
+    unlock_transaction_id BIGINT NOT NULL,
+    unlocked_at DOUBLE PRECISION NOT NULL,
+    first_opened_at DOUBLE PRECISION,
+    UNIQUE (user_id, content_id)
+);
+CREATE TABLE IF NOT EXISTS media_tag_affinity (
+    user_id BIGINT NOT NULL,
+    tag_group TEXT NOT NULL,
+    tag_value TEXT NOT NULL,
+    score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    updated_at DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (user_id, tag_group, tag_value)
+);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_content_uniq ON shared_content(user_id, kind, item_id);
 CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_user_mode ON messages(user_id, mode);
@@ -119,6 +179,28 @@ CREATE INDEX IF NOT EXISTS idx_sent_content_user ON sent_content(user_id);
 CREATE INDEX IF NOT EXISTS idx_sent_content_paid ON sent_content(user_id, content_id, paid);
 CREATE INDEX IF NOT EXISTS idx_user_facts ON user_facts(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_facts_key ON user_facts(user_id, key);
+CREATE INDEX IF NOT EXISTS idx_media_offers_user_delivery
+    ON media_offers(user_id, status, offered_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_offers_user_content
+    ON media_offers(user_id, content_id, status, batch_number DESC);
+-- Repair any crash-era duplicate live reservations before enforcing the
+-- one-reservation-per-item invariant on an upgraded demo database.
+WITH ranked_live_reservations AS (
+    SELECT id, ROW_NUMBER() OVER (
+        PARTITION BY user_id, content_id ORDER BY id DESC
+    ) AS reservation_rank
+    FROM media_offers WHERE status = 'reserved'
+)
+UPDATE media_offers SET status = 'cancelled'
+WHERE id IN (
+    SELECT id FROM ranked_live_reservations WHERE reservation_rank > 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_media_offers_one_live_reservation
+    ON media_offers(user_id, content_id) WHERE status = 'reserved';
+CREATE INDEX IF NOT EXISTS idx_media_entitlements_user
+    ON media_entitlements(user_id, unlocked_at DESC);
+CREATE INDEX IF NOT EXISTS idx_demo_token_transactions_user
+    ON demo_token_transactions(user_id, created_at DESC);
 """
 
 _pool: asyncpg.Pool | None = None
@@ -168,6 +250,10 @@ class _ConnAdapter:
     async def commit(self):
         # asyncpg autocommits outside an explicit transaction.
         pass
+
+    def transaction(self):
+        """Return asyncpg's transaction context for atomic multi-query work."""
+        return self._raw.transaction()
 
     async def close(self):
         await _pool.release(self._raw)
