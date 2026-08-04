@@ -1,5 +1,5 @@
 # Slow-burning background storyline with Tyler. Advances by TOTAL MESSAGES the
-# user has sent (engagement_state.total_messages), so her life moves at the
+# user has sent (persisted user rows in `messages`), so her life moves at the
 # pace of the conversation itself — thresholds below are easy to tune.
 #
 # Events are cumulative: the LAST event whose `after_messages` has passed is

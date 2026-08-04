@@ -9,7 +9,6 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   mode: "sexting" | "story";
-  imageUrl?: string;
 }
 
 interface UseChatOptions {
@@ -19,6 +18,16 @@ interface UseChatOptions {
   // While true, the one-time opening is NOT requested on connect — the intro
   // popup is showing. Dismissing it calls releaseOpening() to kick it off.
   holdOpening?: boolean;
+}
+
+interface HistoryMessage {
+  role: ChatMessage["role"];
+  content: string;
+  timestamp: number;
+}
+
+interface HistoryResponse {
+  messages?: HistoryMessage[];
 }
 
 export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "", holdOpening = false }: UseChatOptions = {}) {
@@ -49,24 +58,17 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
   const genId = () => `msg-${Date.now()}-${idCounter.current++}`;
 
   // Load history for current mode
-  const loadHistory = useCallback(async (m: string) => {
+  const loadHistory = useCallback(async (m: ChatMessage["mode"]) => {
     try {
       const res = await fetch(`${API_BASE}/api/history/${m}?user_id=${userId}`);
       if (!res.ok) return;
-      const data = await res.json();
-      const loaded: ChatMessage[] = (data.messages || []).map((msg: any) => ({
+      const data = (await res.json()) as HistoryResponse;
+      const loaded: ChatMessage[] = (data.messages || []).map((msg) => ({
         id: genId(),
         role: msg.role,
         content: msg.content,
         timestamp: msg.timestamp,
         mode: m,
-        // Stored as a relative path ("/uploads/..") — make it absolute against
-        // the backend so the <img> resolves regardless of the frontend origin.
-        imageUrl: msg.image_url
-          ? msg.image_url.startsWith("http")
-            ? msg.image_url
-            : `${API_BASE}${msg.image_url}`
-          : undefined,
       }));
 
       // Fresh opening: Mia initiated and the user hasn't replied yet
@@ -117,7 +119,7 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
   }, [userId]);
 
   // Connect WebSocket
-  const connect = useCallback(() => {
+  const connect = useCallback(function connectSocket() {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const ws = new WebSocket(`${wsUrl}?user_id=${userId}&user_name=${encodeURIComponent(userName)}`);
@@ -172,19 +174,6 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
           };
           setMessages((prev) => [...prev, newMsg]);
           break;
-        case "image":
-          if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
-          setIsTyping(false);
-          const imageUrl = data.url?.startsWith("http") ? data.url : `${API_BASE}${data.url}`;
-          const imgMsg: ChatMessage = {
-            id: genId(),
-            role: "assistant",
-            content: `[image:${imageUrl}]`,
-            timestamp: data.timestamp || Date.now() / 1000,
-            mode: data.mode || "sexting",
-          };
-          setMessages((prev) => [...prev, imgMsg]);
-          break;
         case "flagged":
           if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
           setIsTyping(false);
@@ -202,7 +191,7 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
     ws.onclose = () => {
       setIsConnected(false);
       console.log("WebSocket disconnected, reconnecting in 3s...");
-      reconnectTimer.current = setTimeout(connect, 3000);
+      reconnectTimer.current = setTimeout(connectSocket, 3000);
     };
 
     ws.onerror = (err) => {
@@ -212,37 +201,20 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
 
   // Send message
   const sendMessage = useCallback(
-    (text: string, imageDataUrl?: string) => {
-      if (!text.trim() && !imageDataUrl) return;
+    (text: string) => {
+      if (!text.trim()) return;
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
       const now = Date.now() / 1000;
 
-      // Show the user's messages immediately: the photo as its own image
-      // bubble (so it actually renders), plus a text bubble if there's text.
-      const newMsgs: ChatMessage[] = [];
-      if (imageDataUrl) {
-        newMsgs.push({
-          id: genId(),
-          role: "user",
-          content: `[image:${imageDataUrl}]`,
-          timestamp: now,
-          mode,
-        });
-      }
-      if (text.trim()) {
-        newMsgs.push({
-          id: genId(),
-          role: "user",
-          content: text,
-          timestamp: now,
-          mode,
-        });
-      }
-      setMessages((prev) => [...prev, ...newMsgs]);
-
-      // Backend expects raw base64 (no "data:...;base64," prefix) for vision.
-      const imageBase64 = imageDataUrl ? imageDataUrl.split(",")[1] : undefined;
+      const newMessage: ChatMessage = {
+        id: genId(),
+        role: "user",
+        content: text,
+        timestamp: now,
+        mode,
+      };
+      setMessages((prev) => [...prev, newMessage]);
 
       // Send via WebSocket
       wsRef.current.send(
@@ -250,7 +222,6 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
           type: "message",
           content: text,
           mode,
-          image: imageBase64 || undefined,
         })
       );
     },
@@ -302,13 +273,15 @@ export function useChat({ wsUrl = `${WS_BASE}/ws/chat`, userId = 1, userName = "
   // re-runs — reconnecting and reloading — whenever the user changes.
   useEffect(() => {
     connect();
-    loadHistory(mode);
+    const historyTimer = setTimeout(() => {
+      void loadHistory(mode);
+    }, 0);
     return () => {
+      clearTimeout(historyTimer);
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       if (typingTimer.current) clearTimeout(typingTimer.current);
       wsRef.current?.close();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connect, loadHistory]);
 
   return {

@@ -159,4 +159,9 @@ def format_mood_for_prompt(mood: dict | None) -> str | None:
     instruction = MOODS.get(name)
     if not instruction:
         return None
-    return f"YOUR MOOD RIGHT NOW ({name}): {instruction} Let it colour your tone naturally — don't announce it."
+    intensity = max(1, min(3, int(mood.get("intensity", 1))))
+    strength = {1: "subtle", 2: "clear", 3: "strong"}[intensity]
+    return (
+        f"YOUR MOOD RIGHT NOW ({name}, {strength}): {instruction} "
+        "Let it colour your tone naturally — don't announce it."
+    )

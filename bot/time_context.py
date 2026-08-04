@@ -1,7 +1,7 @@
 """
 Time-of-day awareness for Mia based on Miami (US/Eastern) timezone.
 
-Provides mood context, selfie tag preferences, and real weather data that
+Provides mood context, content tag preferences, and real weather data that
 shift throughout the day to make her feel like a real person with a schedule.
 """
 
@@ -385,10 +385,10 @@ async def get_time_prompt(heat: str | None = None) -> str:
     """Prompt injection describing where Mia is (and, when the conversation is
     already hot, what she's craving).
 
-    `heat` mirrors the user's register (see chat_engine._conversation_heat):
-    at "low" the explicit craving line is omitted entirely — a casual chat
-    must not get an unprompted sexual thread injected into it. None (cards,
-    openings before a register exists) keeps the full craving context."""
+    `heat` mirrors the user's register (see chat_engine._conversation_heat).
+    Explicit energy/cravings are included only at `high`; `None` is reserved
+    for explicit card generation. Low, rising and cooling/medium turns remain
+    free of scripted graphic pressure."""
     now = datetime.now(TIMEZONE)
     period = get_time_period()
     info = _active_periods()[period]
@@ -424,8 +424,8 @@ async def get_time_prompt(heat: str | None = None) -> str:
         f"You are {info['where']} right now — {info['activity']}. "
     )
     # The scripted "energy" lines lean horny/wet — they only belong in an
-    # already-heated chat. At low/rising the mood line carries the tone.
-    if heat not in ("low", "rising"):
+    # explicitly hot chat. Low/rising/medium use the heat guidance instead.
+    if heat in (None, "high"):
         scene_lines += f"You feel {info['energy']}. "
     scene_lines += (
         "If he asks where you are, answer truthfully from this. Same if he asks "
@@ -440,9 +440,9 @@ async def get_time_prompt(heat: str | None = None) -> str:
         "earlier messages. A real person never re-announces her scene or re-tells "
         "her night. Add a genuinely NEW detail or just move on. "
     )
-    if heat in ("low", "rising"):
-        # Casual chat and the first-spark bridge both stay free of injected
-        # cravings — on the bridge she reacts to HIM, not to a scripted want.
+    if heat in ("low", "rising", "medium"):
+        # Casual, bridge and cooling turns stay free of injected cravings; she
+        # reacts to him instead of being railroaded by a scripted want.
         scene_lines += (
             "Mention what you're doing naturally when it fits — your location colours "
             "your replies; never just announce the time, day, or weather."
@@ -469,7 +469,7 @@ async def get_time_prompt(heat: str | None = None) -> str:
     return " ".join(parts)
 
 
-def get_preferred_tags() -> list[str]:
-    """Get preferred selfie tags for the current time period."""
+def get_preferred_content_tags() -> list[str]:
+    """Get preferred story/content tags for the current time period."""
     period = get_time_period()
     return _active_periods()[period]["preferred_tags"]

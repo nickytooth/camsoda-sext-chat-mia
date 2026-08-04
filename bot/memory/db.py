@@ -26,8 +26,21 @@ CREATE TABLE IF NOT EXISTS messages (
     timestamp DOUBLE PRECISION NOT NULL,
     mode TEXT NOT NULL DEFAULT 'sexting'
 );
-ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS tag TEXT;
+-- A valid empty memory extraction must not delete the transcript or retry the
+-- same oldest batch forever.  The persistent marker advances the summarizer
+-- cursor across restarts while all original message content remains intact.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS memory_deferred_at DOUBLE PRECISION;
+-- Remove columns left by the retired user-photo/vision feature.  These
+-- migrations are intentionally destructive: the application is text-only and
+-- must not retain backend references to uploaded user media.
+ALTER TABLE messages DROP COLUMN IF EXISTS image_url;
+-- Old vision descriptions were appended to user text with this exact backend
+-- marker. Remove media-only rows and preserve any caption that preceded it.
+DELETE FROM messages WHERE content LIKE '[User sent a photo:%';
+UPDATE messages
+SET content = BTRIM(SPLIT_PART(content, '[User sent a photo:', 1))
+WHERE content LIKE '%[User sent a photo:%';
 CREATE TABLE IF NOT EXISTS memories (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
@@ -60,16 +73,36 @@ CREATE TABLE IF NOT EXISTS engagement_state (
     user_id BIGINT PRIMARY KEY,
     nsfw_count INTEGER NOT NULL DEFAULT 0,
     total_messages INTEGER NOT NULL DEFAULT 0,
+    lifetime_user_messages BIGINT NOT NULL DEFAULT 0,
     last_push_at DOUBLE PRECISION DEFAULT 0,
-    last_selfie_at DOUBLE PRECISION DEFAULT 0,
     last_message_at DOUBLE PRECISION DEFAULT 0,
     last_reengage_at DOUBLE PRECISION DEFAULT 0
 );
+ALTER TABLE engagement_state DROP COLUMN IF EXISTS last_selfie_at;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_push_content_id TEXT;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS first_message_at DOUBLE PRECISION;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS active_days INTEGER DEFAULT 0;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_active_date TEXT;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_arc_id TEXT;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS lifetime_user_messages BIGINT NOT NULL DEFAULT 0;
+-- Safe one-time/backward-compatible lower-bound backfill. Existing deployments
+-- may already have summarized old message rows, so retain the larger historic
+-- batch counter; otherwise use the exact user rows that are still available.
+INSERT INTO engagement_state (user_id, lifetime_user_messages)
+SELECT user_id, COUNT(*)
+FROM messages
+WHERE role = 'user'
+GROUP BY user_id
+ON CONFLICT(user_id) DO UPDATE SET
+    lifetime_user_messages = GREATEST(
+        engagement_state.lifetime_user_messages,
+        EXCLUDED.lifetime_user_messages
+    );
+UPDATE engagement_state
+SET lifetime_user_messages = GREATEST(
+    lifetime_user_messages,
+    total_messages::BIGINT
+);
 CREATE TABLE IF NOT EXISTS shared_content (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,

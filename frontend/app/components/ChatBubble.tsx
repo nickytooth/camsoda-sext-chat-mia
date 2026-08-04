@@ -16,6 +16,19 @@ interface Props {
 }
 
 export default function ChatBubble({ message, showReceipt, read }: Props) {
+  const isUser = message.role === "user";
+
+  // WhatsApp-style read receipts (sexting only), shown under EVERY user message
+  // and kept there. A fresh message animates: one grey tick the instant it's
+  // sent, then after ~1s flips to blue "Read" with double ticks — right as her
+  // typing bubble appears. Already-read history messages render blue immediately.
+  const [autoRead, setAutoRead] = useState(false);
+  useEffect(() => {
+    if (!isUser || !showReceipt || read) return;
+    const t = setTimeout(() => setAutoRead(true), 1000);
+    return () => clearTimeout(t);
+  }, [isUser, showReceipt, read, message.id]);
+
   // System messages (moderation flags) — centered grey bubble, no avatar
   if (message.role === "system") {
     return (
@@ -26,20 +39,6 @@ export default function ChatBubble({ message, showReceipt, read }: Props) {
       </div>
     );
   }
-
-  const isUser = message.role === "user";
-
-  // WhatsApp-style read receipts (sexting only), shown under EVERY user message
-  // and kept there. A fresh message animates: one grey tick the instant it's
-  // sent, then after ~1s flips to blue "Read" with double ticks — right as her
-  // typing bubble appears. Already-read history messages render blue immediately.
-  const [autoRead, setAutoRead] = useState(false);
-  useEffect(() => {
-    if (!isUser || !showReceipt || read) return;
-    setAutoRead(false);
-    const t = setTimeout(() => setAutoRead(true), 1000);
-    return () => clearTimeout(t);
-  }, [isUser, showReceipt, read, message.id]);
 
   const isRead = read || autoRead;
 
@@ -56,31 +55,6 @@ export default function ChatBubble({ message, showReceipt, read }: Props) {
         <span>{formatTime(message.timestamp)}</span>
         <Check size={14} className="text-[var(--muted)]" />
       </span>
-    );
-  }
-
-  // A persisted upload (imageUrl, from history) or a live preview bubble whose
-  // content is an [image:...] marker — both render as an image.
-  const isImage = !!message.imageUrl || message.content.startsWith("[image:");
-
-  if (isImage) {
-    const url = message.imageUrl ?? message.content.slice(7, -1);
-
-    return (
-      <div className={`flex ${isUser ? "justify-end" : "justify-start"} mb-3 px-4`}>
-        <div className="max-w-[320px]">
-          <div className="relative overflow-hidden rounded-2xl border border-[var(--border)]">
-            <img
-              src={url}
-              alt=""
-              className="block w-full"
-            />
-          </div>
-          <div className={`text-[11px] text-[var(--muted)] mt-1 flex items-center gap-1 ${isUser ? "justify-end" : "justify-start"}`}>
-            {receipt ?? formatTime(message.timestamp)}
-          </div>
-        </div>
-      </div>
     );
   }
 

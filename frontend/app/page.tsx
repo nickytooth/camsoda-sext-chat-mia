@@ -68,13 +68,16 @@ export default function Home() {
 
   // Load saved user from localStorage
   useEffect(() => {
-    const saved = localStorage.getItem("mia_user");
-    if (saved) {
-      const { name, id } = JSON.parse(saved);
-      setUserName(name);
-      setUserId(id);
-    }
-    setReady(true);
+    const hydrationTimer = window.setTimeout(() => {
+      const saved = localStorage.getItem("mia_user");
+      if (saved) {
+        const { name, id } = JSON.parse(saved);
+        setUserName(name);
+        setUserId(id);
+      }
+      setReady(true);
+    }, 0);
+    return () => window.clearTimeout(hydrationTimer);
   }, []);
 
   const handleNameSubmit = (name: string) => {
@@ -89,7 +92,7 @@ export default function Home() {
     if (!userName) return;
     try {
       await fetch(`${API_BASE}/api/reset?user_id=${userId}`, { method: "POST" });
-    } catch (e) {}
+    } catch {}
     localStorage.removeItem("mia_user");
     setUserName(null);
     setUserId(1);

@@ -7,18 +7,17 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
-import base64
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from bot.config import (
-    SERVER_HOST, SERVER_PORT, UPLOADS_DIR,
-    DEFAULT_USER_ID, PERSONA_FILE_SEXTING, GEMINI_FALLBACK_MODEL,
+    SERVER_HOST, SERVER_PORT, DEFAULT_USER_ID, PERSONA_FILE_SEXTING,
+    GEMINI_FALLBACK_MODEL,
 )
 from bot.memory.db import init_db, get_connection
 from bot.memory.stm import get_all_messages
@@ -33,6 +32,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+MAX_USER_MESSAGE_CHARS = 6000
+MAX_USER_NAME_CHARS = 48
 
 # Global chat engine
 engine: ChatEngine | None = None
@@ -59,7 +61,6 @@ async def lifespan(app: FastAPI):
     # thinking_budget=0 → no "thinking" latency; this provider only writes short
     # replies (suggestions + Grok fallback), so speed matters more than reasoning.
     fallback_provider = GeminiProvider(GEMINI_FALLBACK_MODEL, thinking_budget=0)
-    vision_provider = GrokProvider()
     # Input moderation: Grok, not Gemini. Gemini's non-configurable
     # PROHIBITED_CONTENT filter refuses to even classify the very content we
     # need to detect (bestiality, CSAM, etc.), returning an empty response.
@@ -71,8 +72,8 @@ async def lifespan(app: FastAPI):
         nsfw_persona=nsfw_persona,
         nsfw_provider=nsfw_provider,
         classifier_provider=classifier_provider,
-        vision_provider=vision_provider,
         fallback_provider=fallback_provider,
+        moderation_provider=moderation_provider,
     )
     logger.info("Chat engine ready")
 
@@ -91,12 +92,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve user-uploaded photos (created on first upload; ensure it exists so the
-# mount succeeds even before the first photo is sent).
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
-
-
 # ------------------------------------------------------------------
 # REST endpoints
 # ------------------------------------------------------------------
@@ -110,12 +105,12 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 # Inspiration angles for the LLM-generated opening — one is sampled per
 # generation so first messages land on a different excuse every time.
 # They are hints, not scripts: the instruction tells her to invent her own.
-# ALL of them are rooted in the night they met — a club party a few days
-# ago (see her core memories): this is her FIRST text to him ever, so the
+# ALL of them are rooted in the night they met at a club party (see her
+# core memories): this is her FIRST text to him ever, so the
 # hook must be the one thing THEY share — that night — not her opaque
 # daily life.
 _OPENING_ANGLES_CLUB = [
-    "you finally caved and texted — that eye contact at the club a few nights ago hasn't left your head",
+    "you finally caved and texted — that eye contact when you met at the club hasn't left your head",
     "you got his number off Tyler's phone at the club and he doesn't know that yet",
     "you almost texted him every day since the club and today you stopped chickening out",
     "you bring up the moment at the club when you caught him staring at you across the dance floor",
@@ -150,7 +145,7 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
                 f"{persona_prompt}\n\n"
                 f"{time_prompt}\n\n"
                 "You are texting him FIRST — your first text to him EVER. The reason "
-                "you're texting is the night you two MET, a few days ago: the party at "
+                "you're texting is the night you two MET: the party at "
                 "the club Tyler dragged everyone to (see your core memories — the "
                 "bikini top, the eye contact across the dance floor, the number you "
                 "took off Tyler's phone). Reference that night so he instantly knows "
@@ -176,7 +171,17 @@ async def _generate_dynamic_opening(engine: ChatEngine) -> str:
         },
         {"role": "user", "content": "(he hasn't said anything yet — you're texting first)"},
     ]
-    return await engine.nsfw_provider.generate(messages)
+    # Use the shared primary -> fallback path so both candidates cross the
+    # deterministic output guard and the full async moderation gate. Returning
+    # empty makes the caller choose the authored static opening.
+    opening = await engine._generate_with_fallback(
+        engine.nsfw_provider,
+        messages,
+        heat="low",
+    )
+    if not opening:
+        raise RuntimeError("Dynamic opening rejected by output validation")
+    return opening
 
 
 @app.get("/api/history/{mode}")
@@ -192,12 +197,10 @@ async def get_history(mode: str, user_id: int = Query(default=None)):
     for m in messages:
         if m["role"] not in ("user", "assistant"):
             continue
-        img = m.get("image_url")
         entry = {
             "role": m["role"],
             "content": m["content"],
             "timestamp": m["timestamp"],
-            "image_url": img,
         }
         out.append(entry)
 
@@ -209,6 +212,8 @@ async def suggest_reply(user_id: int = Query(default=None), mode: str = Query(de
     """AI Help — generate a suggested reply for the user to send to Mia."""
     if not engine:
         return JSONResponse({"error": "Engine not ready"}, status_code=503)
+    if mode != "sexting":
+        return JSONResponse({"error": "Invalid mode"}, status_code=400)
     uid = user_id or DEFAULT_USER_ID
     try:
         suggestion = await engine.suggest_reply(uid, mode=mode)
@@ -429,9 +434,38 @@ def _latinize_name(name: str) -> str:
             out.append(t.capitalize() if ch.isupper() else t)
         else:
             out.append(ch)
-    # Store the name properly capitalized regardless of how it was typed —
-    # the prompt quotes it verbatim and Mia copies whatever casing she sees.
-    return capitalize_user_name("".join(out))
+    latin = "".join(out)
+    # Names are data inside the system context. Keep only ordinary name
+    # characters so query-string newlines or prompt-like text cannot become an
+    # instruction. Collapse whitespace and enforce a small, human-sized bound.
+    latin = re.sub(r"[^A-Za-z' -]", "", latin)
+    latin = re.sub(r"\s+", " ", latin).strip(" '-")[:MAX_USER_NAME_CHARS]
+    return capitalize_user_name(latin)
+
+
+async def _message_is_blocked(user_id: int, text: str, mode: str) -> bool:
+    """Apply the same input gate to normal messages and card requests."""
+    if len(text) > MAX_USER_MESSAGE_CHARS:
+        logger.warning("Oversized message blocked for user %d (%d chars)", user_id, len(text))
+        await manager.send_json(
+            user_id, {"type": "flagged", "mode": mode, "category": "too-long"}
+        )
+        return True
+    from bot.moderation import moderate
+
+    mod_result = await moderate(text, moderation_provider)
+    if not mod_result.flagged:
+        return False
+    logger.warning(
+        "Message flagged [%s] for user %d: %s",
+        mod_result.category, user_id, text[:80],
+    )
+    await manager.send_json(user_id, {"type": "typing_end"})
+    await manager.send_json(
+        user_id,
+        {"type": "flagged", "mode": mode, "category": mod_result.category},
+    )
+    return True
 
 
 async def _maybe_send_opening(user_id: int) -> None:
@@ -461,7 +495,7 @@ async def _maybe_send_opening(user_id: int) -> None:
             opening = engine.persona.get_random_opening()
         from bot.memory.facts import get_user_name
         opening = capitalize_names(opening, (await get_user_name(user_id),))
-        parts = [p.strip() for p in opening.split("\n") if p.strip()]
+        parts = engine._split_response(opening)[: engine.MAX_BUBBLES]
         from bot.memory.stm import add_message as stm_add
         for part in parts:
             await stm_add(user_id, "assistant", part, mode="sexting")
@@ -481,7 +515,9 @@ async def websocket_chat(ws: WebSocket, user_id: int = Query(default=None), user
     # names are transliterated so she can use them in English text.
     if user_name:
         from bot.memory.facts import upsert_fact
-        await upsert_fact(user_id, "name", _latinize_name(user_name))
+        safe_name = _latinize_name(user_name)
+        if safe_name:
+            await upsert_fact(user_id, "name", safe_name)
 
     try:
         while True:
@@ -503,6 +539,8 @@ async def websocket_chat(ws: WebSocket, user_id: int = Query(default=None), user
                 kind = data.get("kind", "")
                 if kind not in ("fantasy", "story"):
                     continue
+                if text and await _message_is_blocked(user_id, text, mode):
+                    continue
                 _cancel_idle(user_id)
                 nudge_counts[user_id] = 0
                 logger.info("WS card from user %d: %s", user_id, kind)
@@ -523,38 +561,19 @@ async def websocket_chat(ws: WebSocket, user_id: int = Query(default=None), user
                 _schedule_idle_nudge(user_id)
                 continue
 
-            # Handle image uploads via WebSocket (base64)
-            image_bytes = None
-            if data.get("image"):
-                try:
-                    image_bytes = base64.b64decode(data["image"])
-                except Exception:
-                    logger.warning("Failed to decode uploaded image for user %d", user_id, exc_info=True)
-
-            if not text and not image_bytes:
+            if not text:
                 continue
 
-            # Input moderation gate — runs BEFORE the engine. Blocks prohibited
-            # content (underage, bestiality, non-consent) with a system bubble
-            # instead of letting it reach the LLM and getting a silent refusal.
-            if text:
-                from bot.moderation import moderate
-                mod_result = await moderate(text, moderation_provider)
-                if mod_result.flagged:
-                    logger.warning(
-                        "Message flagged [%s] for user %d: %s",
-                        mod_result.category, user_id, text[:80],
-                    )
-                    await manager.send_json(user_id, {"type": "typing_end"})
-                    await manager.send_json(user_id, {"type": "flagged", "mode": mode})
-                    continue
+            # Normal messages and card text share one fail-closed input gate.
+            if await _message_is_blocked(user_id, text, mode):
+                continue
 
             # User is active again — cancel any pending idle nudge and reset
             # the consecutive-nudge counter so she can nudge again later.
             _cancel_idle(user_id)
             nudge_counts[user_id] = 0
 
-            logger.info("WS message from user %d [%s]: %s", user_id, mode, (text or "[image]")[:80])
+            logger.info("WS message from user %d [%s]: %s", user_id, mode, text[:80])
 
             # Sexting mode: batched processing. Start the typing indicator
             # right away so she looks like she's already typing while the
@@ -566,9 +585,7 @@ async def websocket_chat(ws: WebSocket, user_id: int = Query(default=None), user
                 # Start the idle countdown once she's done replying.
                 _schedule_idle_nudge(user_id)
 
-            await engine.process_sexting_batched(
-                user_id, text, image_bytes=image_bytes, on_response=on_response
-            )
+            await engine.process_sexting_batched(user_id, text, on_response=on_response)
 
     except WebSocketDisconnect:
         _cancel_idle(user_id)

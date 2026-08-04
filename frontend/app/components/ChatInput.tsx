@@ -1,20 +1,17 @@
 "use client";
 
-import React, { useRef } from "react";
-import { Send, Paperclip } from "lucide-react";
+import React from "react";
+import { Send } from "lucide-react";
 
 interface Props {
   value: string;
   onChange: (text: string) => void;
-  onSend: (text: string, imageBase64?: string) => void;
+  onSend: (text: string) => void;
   disabled?: boolean;
   placeholder?: string;
 }
 
 export default function ChatInput({ value, onChange, onSend, disabled, placeholder }: Props) {
-  const fileRef = useRef<HTMLInputElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!value.trim() || disabled) return;
@@ -29,46 +26,13 @@ export default function ChatInput({ value, onChange, onSend, disabled, placehold
     }
   };
 
-  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      // Pass the full data URL (keeps the real mime type) so the UI can render
-      // a preview; useChat strips the prefix back to raw base64 for the backend.
-      onSend(value.trim() || "", reader.result as string);
-      onChange("");
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
-  };
-
   return (
     <form
       onSubmit={handleSubmit}
       className="flex items-center gap-2 px-4 py-3 bg-[#111118] border-t border-[var(--border)]"
     >
-      {/* Attachment */}
-      <button
-        type="button"
-        onClick={() => fileRef.current?.click()}
-        className="p-2 text-[var(--muted)] hover:text-[var(--accent)] transition-colors"
-        title="Send photo"
-      >
-        <Paperclip size={20} />
-      </button>
-      <input
-        ref={fileRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={handleFile}
-      />
-
       {/* Text input */}
       <input
-        ref={inputRef}
         type="text"
         value={value}
         onChange={(e) => onChange(e.target.value)}

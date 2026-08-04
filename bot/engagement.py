@@ -15,12 +15,37 @@ from bot.time_context import TIMEZONE
 logger = logging.getLogger(__name__)
 
 
+async def record_user_message(user_id: int) -> None:
+    """Increment the monotonic lifetime count for one ingested user message.
+
+    This deliberately does not update last-seen or NSFW analytics: those remain
+    batch-level concerns in ``track_message``. Keeping the lifetime counter at
+    ingestion means debounce batching and later STM summarization cannot make a
+    long-running narrative arc move backwards or skip rapid-fire messages.
+    """
+    conn = await get_connection()
+    try:
+        await conn.execute(
+            """
+            INSERT INTO engagement_state (user_id, lifetime_user_messages)
+            VALUES (?, 1)
+            ON CONFLICT(user_id) DO UPDATE SET
+                lifetime_user_messages =
+                    COALESCE(engagement_state.lifetime_user_messages, 0) + 1
+            """,
+            (user_id,),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
 async def track_message(user_id: int, classification: str) -> None:
     """Track a user message and its SFW/NSFW classification.
 
-    Also counts ACTIVE chat days (distinct Miami-time calendar days on which
-    the user messaged) — the Tyler arc advances by these, so her life moves
-    every time he comes back on a new day, not by slow real-world weeks."""
+    Also retains active-day analytics. The Tyler arc uses the separate
+    ingestion-time ``lifetime_user_messages`` counter, so this batch-level
+    update cannot collapse rapid-fire messages into one progression step."""
     conn = await get_connection()
     try:
         now = time.time()
