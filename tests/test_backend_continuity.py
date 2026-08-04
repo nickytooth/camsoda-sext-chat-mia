@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from bot.chat_engine import ChatEngine, ChatResponse
+from bot.memory import db
 from bot.memory.db import SCHEMA
 from bot.moderation import regex_soft_trigger
 from bot.output_guard import validate_mia_reply, validate_user_suggestion
@@ -15,6 +16,26 @@ class QueueProvider:
 
     async def generate_simple(self, prompt):
         return "unused"
+
+
+class SchemaInitializationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_schema_is_sent_as_one_sql_script(self):
+        connection = AsyncMock()
+
+        class AcquireContext:
+            async def __aenter__(self):
+                return connection
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        pool = Mock()
+        pool.acquire.return_value = AcquireContext()
+
+        with patch.object(db, "_get_pool", new=AsyncMock(return_value=pool)):
+            await db.init_db()
+
+        connection.execute.assert_awaited_once_with(db.SCHEMA)
 
 
 class GeneratedTextProvider:

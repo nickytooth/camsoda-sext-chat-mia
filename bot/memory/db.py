@@ -190,7 +190,7 @@ async def get_connection() -> _ConnAdapter:
 
 async def init_db() -> None:
     pool = await _get_pool()
-    statements = [s.strip() for s in SCHEMA.split(";") if s.strip()]
     async with pool.acquire() as conn:
-        for stmt in statements:
-            await conn.execute(stmt)
+        # Let PostgreSQL parse the complete script. Splitting on semicolons is
+        # not SQL-aware and breaks on semicolons inside comments or literals.
+        await conn.execute(SCHEMA)
