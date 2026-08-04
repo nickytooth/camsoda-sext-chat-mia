@@ -40,8 +40,11 @@ The checked-in runtime catalog is intentionally empty. Populate it only with
 distinct private-only assets; never reuse files from `frontend/public`, because
 those are served without an entitlement.
 
-Keep the bucket private and upload the full/preview/poster object keys from
-`library/media_catalog.yaml` before deploying the backend. Configure R2 CORS
+Keep the bucket private. Generate derivatives, upload immutable objects and
+atomically build the catalog with `python scripts/media_pipeline.py publish`
+before deploying the backend; setup is documented in `README.md`. Use separate
+bucket-scoped read/write credentials for that offline command and read-only
+credentials for the backend. Configure R2 CORS
 for the exact frontend domain with `GET`/`HEAD`, the `Range` request header,
 and exposed `Accept-Ranges`, `Content-Length`, and `Content-Range` response
 headers. Backend startup validates every referenced object when R2 credentials

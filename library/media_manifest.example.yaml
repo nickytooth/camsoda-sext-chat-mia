@@ -1,0 +1,45 @@
+# Copy this file to .private-media/manifest.yaml and put the referenced
+# originals in .private-media/originals/. The pipeline generates every storage
+# key, derivative, checksum, MIME type, aspect ratio and video duration.
+version: 1
+items:
+  - id: mia_bar_001
+    source: mia_bar_001.jpg
+    type: photo
+    status: active
+    explicitness: suggestive
+    min_heat: rising
+    presentation:
+      mode: current_compatible
+      periods: [bar_shift]
+      current_description: a teasing photo from behind the bar during her shift
+      past_description: a teasing photo from one of her bar shifts
+    tags:
+      location: [bar]
+      body_focus: [full_body]
+      activity: [posing]
+      outfit: [bartender_outfit]
+      vibe: [teasing, playful]
+      capture: [mirror, full_body]
+
+  - id: mia_club_clip_001
+    source: mia_club_clip_001.mov
+    type: video
+    status: active
+    explicitness: suggestive
+    min_heat: rising
+    # Optional frame choices. Omit them to use safe automatic positions.
+    preview_time_seconds: 1.5
+    poster_time_seconds: 3.0
+    presentation:
+      mode: past_only
+      periods: []
+      current_description: null
+      past_description: a short teasing clip from one of her club nights
+    tags:
+      location: [club]
+      body_focus: [full_body]
+      activity: [dancing]
+      outfit: [dress]
+      vibe: [teasing, playful]
+      capture: [selfie, full_body]

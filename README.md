@@ -159,6 +159,7 @@ Edit `.env`:
 | `MEDIA_CATALOG_FILE` | | Validated static catalog (default `library/media_catalog.yaml`) |
 | `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | commerce | Cloudflare R2 S3 credentials; when absent, normal chat stays online and media offers/unlocks are disabled |
 | `R2_BUCKET_NAME` | commerce | Private bucket containing the catalog's full, preview and poster keys |
+| `R2_UPLOAD_ACCESS_KEY_ID` / `R2_UPLOAD_SECRET_ACCESS_KEY` | offline tooling | Separate bucket-scoped read/write credentials used only by the media publish command |
 | `R2_SIGNED_PHOTO_TTL_SECONDS` | | Full photo source lifetime (default `600`) |
 | `R2_SIGNED_VIDEO_TTL_SECONDS` | | Full video source lifetime (default `3600`) |
 | `R2_SIGNED_PREVIEW_TTL_SECONDS` | | Private teaser/poster source lifetime (default `3600`) |
@@ -177,19 +178,39 @@ is public. Never use anything under `frontend/public` as paid media: those files
 are directly reachable without an entitlement. Add entries only for distinct,
 approved assets whose full bytes exist exclusively in the private R2 bucket.
 
-Create a **private** Cloudflare R2 bucket (no public/custom domain), then upload
-every `full_key`, `preview_key`, and video `poster_key` declared in
-`library/media_catalog.yaml`. Previews/posters must be separate degraded files;
-never point a locked derivative key at the original. Keep the catalog SHA-256,
-MIME type, aspect ratio, duration, tags and presentation copy aligned with the
-approved source asset.
+Create a **private** Cloudflare R2 bucket (no public/custom domain). Asset
+preparation and upload are automated; do not make previews or edit the runtime
+catalog by hand:
 
-Upload every object with its correct `Content-Type` and a non-empty body. Full
-photo/video objects must also expose the catalog's lowercase hexadecimal digest
-as S3 custom metadata `sha256` (returned by R2 as `x-amz-meta-sha256`), unless
-the upload stores a native full-object SHA-256 checksum. Startup fails closed if
-the MIME type, length, or full-object checksum is missing or does not match the
-catalog.
+```powershell
+python -m pip install -r requirements-media.txt
+New-Item -ItemType Directory -Force .private-media\originals
+Copy-Item library\media_manifest.example.yaml .private-media\manifest.yaml
+
+# Put approved originals in .private-media\originals and edit only the
+# semantic tags/presentation in the private manifest.
+python scripts\media_pipeline.py prepare
+python scripts\media_pipeline.py publish
+```
+
+The pipeline requires `ffmpeg` and `ffprobe` on `PATH` for video normalization
+and the paid-vs-public media safety check.
+
+The ignored `.private-media` directory and `.media-build` output are never
+committed. The pipeline applies image orientation, strips EXIF/GPS and video
+metadata, normalizes videos to browser-compatible H.264/AAC MP4, generates
+separate strongly downscaled/pixelated/blurred WebP previews and video posters,
+computes every checksum/dimension/duration, and uses immutable content-addressed
+R2 keys. A video poster is degraded too because the locked card displays it.
+Representative public-video frames are fingerprinted in memory so re-encoding
+an asset already under `frontend/public` cannot turn it into paid content.
+
+`publish` uses a separate bucket-scoped read/write token, refuses to overwrite
+different bytes with conditional creates, streams the stored object back to
+verify its real SHA-256, HEAD-verifies the entire resulting catalog, and only
+then installs `library/media_catalog.yaml` under a cross-process lock and
+baseline-digest check. A failure leaves the previous catalog unchanged.
+The backend token should be read-only.
 
 Because the unlocked player reads the short-lived signed URL directly, set an
 R2 CORS policy for the exact frontend origins. A local/deployed example is:
@@ -206,7 +227,7 @@ R2 CORS policy for the exact frontend origins. A local/deployed example is:
 ]
 ```
 
-Set the four `R2_*` credentials from `.env.example`. With credentials present,
+Set the R2 credentials from `.env.example`. With runtime credentials present,
 backend startup HEAD-checks every catalog object and refuses an incomplete
 catalog. Without them, text chat stays available but offers/unlocks are disabled.
 

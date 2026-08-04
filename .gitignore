@@ -12,6 +12,14 @@ venv/
 content_index.json
 check_*.py
 
+# Private visual-commerce sources and generated derivatives
+.private-media/
+.media-build/
+.tmp_*
+.preview-*.log
+.*.publish.lock
+.env.media*.local
+
 # Frontend (Next.js)
 node_modules/
 .next/
