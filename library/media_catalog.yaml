@@ -1,0 +1,7 @@
+# Public-repository fallback catalog.
+#
+# Real catalog metadata belongs in the ignored
+# .private-media/media_catalog.yaml file (or MEDIA_CATALOG_FILE). Paid assets
+# remain in private R2; never commit object fingerprints or explicit metadata.
+version: 1
+items: []

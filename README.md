@@ -1,6 +1,6 @@
 # Mia — AI Girlfriend Sexting Chat
 
-A web-based AI girlfriend **sexting** chat app. Features a dark Candy.ai-inspired UI, text-only real-time WebSocket chat, a single always-open persona, two-tier memory (STM + LTM with vector search), time-of-day awareness, AI-drafted reply suggestions, and authored "fantasy / story" cards. User media upload and vision analysis are intentionally unsupported.
+A web-based AI girlfriend **sexting** chat app. Features real-time WebSocket chat, a single always-open persona, two-tier memory, time-of-day awareness, authored fantasy/story cards, and an entitlement-checked visual paywall for private photos and videos. User media uploads and vision analysis remain intentionally unsupported.
 
 ---
 
@@ -17,6 +17,7 @@ A web-based AI girlfriend **sexting** chat app. Features a dark Candy.ai-inspire
 | Input moderation | xAI Grok |
 | Embeddings | OpenAI text-embedding-3-small |
 | Database | PostgreSQL (asyncpg) |
+| Private media | Cloudflare R2 (S3-compatible signed GET sources) |
 | Language | Python 3.13+ / TypeScript |
 
 ---
@@ -25,12 +26,14 @@ A web-based AI girlfriend **sexting** chat app. Features a dark Candy.ai-inspire
 
 - **Always-open persona** — Grok is the primary reply model, with Gemini as a validated fallback. Mia is a single forward persona (`personas/mia.yaml`); there is no SFW/NSFW model switch.
 - **Message batching** — a debounce window collects the user's messages, then they are processed together.
+- **Persistent conversation heat** — one sexual processed batch starts a provocative, non-graphic rising phase; a second intensifies it and a third unlocks high/explicit output. Normal batches do not erase rising momentum, while timeout and consent boundaries cool it deterministically.
 - **Time-of-day awareness** (Miami timezone) colours her mood and location. Weather is optional (only if `OPENWEATHER_API_KEY` is set).
 - **Input moderation** — obvious violations are hard-blocked locally; every other input receives a strict, fail-closed Grok moderation check. The regex soft tier preserves a precise category when the moderator is unavailable.
 - **Output validation** — generated replies, fallback drafts, openings, and AI Help suggestions cross deterministic persona/heat/boundary checks plus semantic moderation before display.
 - **"Hear a fantasy" / "Hear a story" cards** — a fantasy is generated fresh each time (tailored to the user + current location; the library serves as a style example), while a story is delivered verbatim from the authored library and never repeated until exhausted (`library/`).
 - **AI Help** — drafts a suggested next message for the user to send.
 - **Idle re-engagement** — if the user goes quiet while still connected, Mia may send one spontaneous follow-up.
+- **Visual paywall** — a deterministic planner selects one real catalog item; Mia receives only a safe commerce brief, while PostgreSQL owns offer rotation, demo tokens and permanent entitlements. Locked previews and unlocked photos/videos render directly in chat without URL messages.
 
 ---
 
@@ -154,6 +157,17 @@ Edit `.env`:
 | `DEFAULT_USER_ID` | | Single-user demo id (default `1`) |
 | `OPENWEATHER_API_KEY` | optional | Enables Miami weather in her context; omitted → weather is off |
 | `SEXTING_DEBOUNCE_SECONDS` | optional | Debounce before she replies, seconds (default `5`) |
+| `MEDIA_CATALOG_FILE` | | Private runtime catalog (auto-detects `.private-media/media_catalog.yaml`, otherwise uses the empty public fallback) |
+| `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | commerce | Cloudflare R2 S3 credentials; when absent, normal chat stays online and media offers/unlocks are disabled |
+| `R2_BUCKET_NAME` | commerce | Private bucket containing the catalog's full, preview and poster keys |
+| `R2_UPLOAD_ACCESS_KEY_ID` / `R2_UPLOAD_SECRET_ACCESS_KEY` | offline tooling | Separate bucket-scoped read/write credentials used only by the media publish command |
+| `R2_SIGNED_PHOTO_TTL_SECONDS` | | Full photo source lifetime (default `600`) |
+| `R2_SIGNED_VIDEO_TTL_SECONDS` | | Full video source lifetime (default `3600`) |
+| `R2_SIGNED_PREVIEW_TTL_SECONDS` | | Private teaser/poster source lifetime (default `3600`) |
+| `MEDIA_CONFIRMATION_TTL_SECONDS` | | Pending direct-media confirmation lifetime (default `600`) |
+| `MEDIA_CONFIRMATION_MAX_BATCH_GAP` | | Maximum processed batches allowed before a pending confirmation expires (default `4`) |
+| `MEDIA_CONFIRMATION_GRANT_SECONDS` | | Session confirmation reuse lifetime (default `3600`) |
+| `COMMERCE_DEV_RESET_ENABLED` | | Enables the destructive dev-only commerce reset (default `false`) |
 
 Frontend (optional, for non-local backends) — create `frontend/.env.local`:
 
@@ -161,7 +175,70 @@ Frontend (optional, for non-local backends) — create `frontend/.env.local`:
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-### 4. Run
+### 4. Provision the private R2 catalog
+
+The checked-in runtime catalog is intentionally empty because this repository
+is public. Never use anything under `frontend/public` as paid media: those files
+are directly reachable without an entitlement. Add entries only for distinct,
+approved assets whose full bytes exist exclusively in the private R2 bucket.
+
+Create a **private** Cloudflare R2 bucket (no public/custom domain). Asset
+preparation and upload are automated; do not make previews or edit the runtime
+catalog by hand:
+
+```powershell
+python -m pip install -r requirements-media.txt
+New-Item -ItemType Directory -Force .private-media\originals
+Copy-Item library\media_manifest.example.yaml .private-media\manifest.yaml
+
+# Put approved originals in .private-media\originals and edit only the
+# semantic tags/presentation in the private manifest.
+python scripts\media_pipeline.py prepare
+python scripts\media_pipeline.py publish
+```
+
+The pipeline requires `ffmpeg` and `ffprobe` on `PATH` for video normalization
+and the paid-vs-public media safety check.
+
+The ignored `.private-media` directory and `.media-build` output are never
+committed. The pipeline applies image orientation, strips EXIF/GPS and video
+metadata, normalizes videos to browser-compatible H.264/AAC MP4, generates
+separate strongly downscaled/pixelated/blurred WebP previews and video posters,
+computes every checksum/dimension/duration, and uses immutable content-addressed
+R2 keys. A video poster is degraded too because the locked card displays it.
+Representative public-video frames are fingerprinted in memory so re-encoding
+an asset already under `frontend/public` cannot turn it into paid content.
+
+`publish` uses a separate bucket-scoped read/write token, refuses to overwrite
+different bytes with conditional creates, streams the stored object back to
+verify its real SHA-256, HEAD-verifies the entire resulting catalog, and only
+then installs the ignored `.private-media/media_catalog.yaml` under a
+cross-process lock and baseline-digest check. A failure leaves the previous
+catalog unchanged. The tracked `library/media_catalog.yaml` intentionally stays
+empty because this repository is public; deploy the private catalog separately
+or set `MEDIA_CATALOG_FILE` to another protected path.
+The backend token should be read-only.
+
+Because the unlocked player reads the short-lived signed URL directly, set an
+R2 CORS policy for the exact frontend origins. A local/deployed example is:
+
+```json
+[
+  {
+    "AllowedOrigins": ["http://localhost:3000", "https://your-frontend.example"],
+    "AllowedMethods": ["GET", "HEAD"],
+    "AllowedHeaders": ["Range"],
+    "ExposeHeaders": ["Accept-Ranges", "Content-Length", "Content-Range", "ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Set the R2 credentials from `.env.example`. With runtime credentials present,
+backend startup HEAD-checks every catalog object and refuses an incomplete
+catalog. Without them, text chat stays available but offers/unlocks are disabled.
+
+### 5. Run
 
 ```bash
 # Terminal 1 — Backend
@@ -213,6 +290,29 @@ User sends a text message (WebSocket)
   message (× N bubbles, with pauses)
 ```
 
+### Visual commerce flow
+
+```text
+Processed user batch
+  -> deterministic media-intent aliases/tags
+  -> first direct request: persisted text-only confirmation question
+  -> affirmative/repeated request: consume normalized pending intent once
+  -> batch/heat/snooze checks
+  -> catalog planner (current location first, unlocked excluded)
+  -> one reserved database offer, or a trusted text-only unavailable action
+  -> safe COMMERCE BRIEF for Mia (no key, URL, catalog or price)
+  -> persisted teaser text + delivered offer
+  -> structured WebSocket media card
+  -> atomic token debit + permanent entitlement on Unlock
+  -> entitlement-checked, short-lived R2 source inside <img>/<video>
+```
+
+Raw WebSocket messages do not drive sales timing. One completed debounce batch
+increments `engagement_state.total_messages` once, even if it contains hundreds
+of rapidly sent messages. A confirmed explicit direct request may select
+high-minimum inventory without mutating conversational Heat; generic and
+proactive requests continue to respect the durable Heat stage.
+
 ### Memory System
 
 - **STM**: recent turns per user (mode-aware storage; sexting only in this build)
@@ -227,9 +327,15 @@ User sends a text message (WebSocket)
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/ws/chat` | WebSocket | Real-time bidirectional chat; sends Mia's opening on first connect |
-| `/api/history/{mode}` | GET | Chat history (`sexting`) |
+| `/api/history/{mode}` | GET | Mixed `text` / `media_offer` chat history (`sexting`) |
 | `/api/suggest` | POST | AI Help — draft a reply for the user |
-| `/api/reset` | POST | Wipe all data for a user |
+| `/api/demo/wallet` | GET | Demo token balance (initially 1000) |
+| `/api/demo/wallet/refill` | POST | Idempotent +1000 demo-token refill |
+| `/api/media/offers/{offer_id}/unlock` | POST | Atomic, idempotent offer unlock |
+| `/api/media/gallery` | GET | Entitlement-only unlocked gallery |
+| `/api/media/{content_id}/access` | GET | Entitlement-check and short-lived full media source |
+| `/api/reset` | POST | Reset chat/memory while preserving commerce state |
+| `/api/dev/commerce/reset` | POST | Destructive commerce reset; hidden unless explicitly enabled |
 
 ---
 
@@ -245,6 +351,23 @@ Tables are created on startup by `bot/memory/db.py` (`CREATE TABLE IF NOT EXISTS
 | `sent_content` | Tracks generated content sent (dedup, e.g. fantasy themes) |
 | `shared_content` | Tracks authored library items already shared |
 | `engagement_state` | Per-user message counters / timing |
+| `media_offers` | Reserved/delivered/cancelled offer rotation and price snapshots |
+| `media_entitlements` | Permanent unique `(user_id, content_id)` unlocks |
+| `demo_wallets` | Internal-demo token balances |
+| `demo_token_transactions` | Idempotent credit/debit ledger |
+| `media_tag_affinity` | Soft preference scores learned from unlocks |
+| `media_request_confirmations` | Short-lived normalized direct request and session confirmation state |
+
+---
+
+## Visual-paywall demo boundaries
+
+This build is for the internal team. Its name-derived `user_id` is not
+production authentication, tokens are not real payments, and there are no
+subscriptions, bundles or age-verification flow. Every catalog asset must be
+pre-approved and rights-cleared. A production integration should replace the
+`TokenService` implementation and user-identity adapter while retaining the
+catalog planner, entitlement checks and private delivery boundary.
 
 ---
 

@@ -24,10 +24,32 @@ Railway → **New → Database → PostgreSQL**. It exposes `DATABASE_URL` autom
   - `GOOGLE_API_KEY`, `GOOGLE_MODEL` (e.g. `gemini-3-flash-preview`), `GEMINI_FALLBACK_MODEL` (e.g. `gemini-2.5-flash`)
   - `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL` (e.g. `text-embedding-3-small`)
   - `OPENWEATHER_API_KEY` (optional)
+  - private visual commerce: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+    `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`
+  - signed-source lifetimes: `R2_SIGNED_PHOTO_TTL_SECONDS=600`,
+    `R2_SIGNED_VIDEO_TTL_SECONDS=3600`, `R2_SIGNED_PREVIEW_TTL_SECONDS=3600`
+  - keep `COMMERCE_DEV_RESET_ENABLED=false` outside disposable internal demos
   - optional tuning: `SEXTING_DEBOUNCE_SECONDS`, `DEFAULT_USER_ID`
   - `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` are **not required** (Anthropic is not used at runtime)
 - Generate a public domain (Settings → Networking). Note it, e.g. `https://mia-backend.up.railway.app`.
 - Tables are created automatically on first boot (`init_db`).
+
+### Private Cloudflare R2 media
+
+The checked-in runtime catalog is intentionally empty. Populate it only with
+distinct private-only assets; never reuse files from `frontend/public`, because
+those are served without an entitlement.
+
+Keep the bucket private. Generate derivatives, upload immutable objects and
+atomically build the catalog with `python scripts/media_pipeline.py publish`
+before deploying the backend; setup is documented in `README.md`. Use separate
+bucket-scoped read/write credentials for that offline command and read-only
+credentials for the backend. Configure R2 CORS
+for the exact frontend domain with `GET`/`HEAD`, the `Range` request header,
+and exposed `Accept-Ranges`, `Content-Length`, and `Content-Range` response
+headers. Backend startup validates every referenced object when R2 credentials
+are configured; a missing preview/poster/full object fails startup instead of
+allowing an unlock that cannot be viewed.
 
 ## 3. Frontend service
 - **New → same repo**. **Root directory: `frontend`**.
@@ -44,7 +66,10 @@ Open the **PostgreSQL** service → **Data** tab to see/query tables:
 - `messages` — who wrote what (user_id, role, content, timestamp, mode)
 - `memories` — long-term memory (summarised facts + importance)
 - `user_facts` — name, location, etc. per user
-- `engagement_state` — NSFW counts / push timestamps
+- `engagement_state` — chat-batch counters plus durable sales snooze/re-ask state
+- `media_offers`, `media_entitlements` — offer rotation and permanent unlocks
+- `demo_wallets`, `demo_token_transactions` — internal-demo balance + ledger
+- `media_tag_affinity` — soft preference scores from purchases
 Or connect any client with the Postgres connection string.
 
 ---

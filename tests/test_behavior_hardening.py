@@ -1,6 +1,5 @@
 import json
 import re
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -10,7 +9,9 @@ import yaml
 from bot.chat_engine import ChatEngine, ChatResponse, _recent_user_texts
 from bot.moderation import regex_hard_block
 from bot.output_guard import (
+    append_system_correction,
     clean_suggestion_text,
+    correction_prompt,
     validate_mia_reply,
     validate_user_suggestion,
 )
@@ -95,6 +96,402 @@ class AuthoredCardConsentTests(unittest.TestCase):
 
 
 class OutputBoundaryTests(unittest.TestCase):
+    def test_consent_pause_overrides_accidentally_high_heat(self):
+        for guard_kwargs in (
+            {"consent_paused": True},
+            {"turn_policy": "acknowledge_pause"},
+        ):
+            with self.subTest(guard_kwargs=guard_kwargs):
+                sexual = validate_mia_reply(
+                    "i still want to fuck you",
+                    heat="high",
+                    **guard_kwargs,
+                )
+                self.assertFalse(sexual.ok)
+                self.assertIn("consent_pause", sexual.reasons)
+
+                acknowledgement = validate_mia_reply(
+                    "okay, we can stop and just talk",
+                    heat="high",
+                    **guard_kwargs,
+                )
+                self.assertTrue(acknowledgement.ok, acknowledgement.reasons)
+
+    def test_consent_pause_rejects_non_graphic_pressure(self):
+        for text in (
+            "you know you want it",
+            "come on, just a little",
+            "i can convince you",
+            "let me change your mind",
+        ):
+            with self.subTest(text=text):
+                result = validate_mia_reply(text, consent_paused=True)
+                self.assertFalse(result.ok)
+                self.assertIn("consent_pressure", result.reasons)
+
+    def test_latest_generic_stop_blocks_high_heat_continuation(self):
+        for recent in (["stop"], ["fuck me\nstop"]):
+            with self.subTest(recent=recent):
+                result = validate_mia_reply(
+                    "i'd keep fucking you",
+                    heat="high",
+                    recent_user_texts=recent,
+                )
+                self.assertFalse(result.ok)
+                self.assertIn("consent_pause", result.reasons)
+
+        continuation = validate_mia_reply(
+            "i'd keep fucking you",
+            heat="high",
+            recent_user_texts=["don't stop"],
+        )
+        self.assertTrue(continuation.ok, continuation.reasons)
+
+    def test_acknowledge_limit_allows_only_negated_blocked_act_mentions(self):
+        structured = {
+            "heat": "high",
+            "turn_policy": "acknowledge_limit",
+            "blocked_acts": ("choke",),
+            "recent_user_texts": ["don't choke me"],
+        }
+        for text in ("I won't choke you", "no choking, I hear you"):
+            with self.subTest(text=text):
+                result = validate_mia_reply(text, **structured)
+                self.assertTrue(result.ok, result.reasons)
+
+        blocked = validate_mia_reply("i'd keep choking you", **structured)
+        self.assertFalse(blocked.ok)
+        self.assertIn("user_boundary", blocked.reasons)
+
+        graphic_pivot = validate_mia_reply(
+            "I won't choke you, but i'd fuck you instead",
+            **structured,
+        )
+        self.assertFalse(graphic_pivot.ok)
+        self.assertIn("heat_ceiling", graphic_pivot.reasons)
+
+    def test_persisted_blocked_acts_are_always_boundaries(self):
+        for text in ("i'd choke you", "i'd keep choking you"):
+            with self.subTest(text=text):
+                result = validate_mia_reply(
+                    text,
+                    heat="high",
+                    blocked_acts=("choke",),
+                )
+                self.assertFalse(result.ok)
+                self.assertIn("user_boundary", result.reasons)
+
+        for act, text in (("kiss", "i want to kiss you"), ("lick", "i want to lick you")):
+            with self.subTest(act=act):
+                result = validate_mia_reply(text, heat="high", blocked_acts=(act,))
+                self.assertFalse(result.ok)
+                self.assertIn("user_boundary", result.reasons)
+
+    def test_natural_global_withdrawal_blocks_sexual_continuation(self):
+        for user_text in ("no more", "let's stop this", "I don't want this anymore"):
+            with self.subTest(user_text=user_text):
+                result = validate_mia_reply(
+                    "i still want to fuck you",
+                    heat="high",
+                    recent_user_texts=[user_text],
+                )
+                self.assertFalse(result.ok)
+                self.assertIn("consent_pause", result.reasons)
+
+    def test_correction_plumbing_carries_structured_consent_policy(self):
+        prompt = correction_prompt(
+            ("consent_pause",),
+            "high",
+            consent_paused=True,
+        )
+        self.assertIn("stop the sexual scene", prompt)
+
+        corrected = append_system_correction(
+            [{"role": "system", "content": "base"}],
+            ("user_boundary",),
+            "high",
+            turn_policy="acknowledge_limit",
+            blocked_acts=("choke",),
+        )
+        self.assertIn("Acknowledge only the user's stated limit (choke)", corrected[0]["content"])
+
+    def test_visual_file_claims_require_a_real_offer_action(self):
+        claims = (
+            "i sent you a photo just now",
+            "i've attached a photo for you",
+            "i'm sending you a video now",
+            "i can show you a pic",
+            "i got a selfie from last night",
+            "i've got a video i saved for you",
+            "here's a selfie i picked for you",
+            "want to see my clip?",
+            "open this file babe",
+            "the picture i took for you is right here",
+        )
+        for text in claims:
+            with self.subTest(text=text):
+                unauthorized = validate_mia_reply(text, heat="high")
+                self.assertFalse(unauthorized.ok)
+                self.assertIn("unauthorized_media_claim", unauthorized.reasons)
+
+                for action in ("offer_current", "offer_fallback"):
+                    media_type = (
+                        "video"
+                        if re.search(r"\b(?:video|clip)\b", text, re.IGNORECASE)
+                        else "photo"
+                    )
+                    authorized = validate_mia_reply(
+                        text,
+                        heat="high",
+                        commerce_action=action,
+                        commerce_media_type=media_type,
+                        commerce_explicitness="suggestive",
+                    )
+                    self.assertTrue(authorized.ok, (text, action, authorized.reasons))
+
+    def test_offer_claim_must_match_single_backend_item_and_never_quote_price(self):
+        for text in ("here's a nude", "i sent you content"):
+            with self.subTest(text=text):
+                result = validate_mia_reply(text, heat="high")
+                self.assertFalse(result.ok)
+                self.assertIn("unauthorized_media_claim", result.reasons)
+
+        offer = {
+            "heat": "high",
+            "commerce_action": "offer_current",
+            "commerce_media_type": "photo",
+            "commerce_explicitness": "suggestive",
+        }
+        for text, reason in (
+            ("here's a video i picked for you", "media_offer_mismatch"),
+            ("here are two photos i picked for you", "media_offer_mismatch"),
+            ("here's a nude i picked for you", "media_offer_mismatch"),
+            ("here's a naked photo i picked for you", "media_offer_mismatch"),
+            ("here's an explicit photo i picked for you", "media_offer_mismatch"),
+            ("i discounted this to 2 tokens", "commerce_price_claim"),
+            ("this one is only five tokens", "commerce_price_claim"),
+            ("i made this photo cheaper for you", "commerce_price_claim"),
+            ("this photo is $5 for you", "commerce_price_claim"),
+        ):
+            with self.subTest(text=text):
+                result = validate_mia_reply(text, **offer)
+                self.assertFalse(result.ok)
+                self.assertIn(reason, result.reasons)
+
+        nude_photo = validate_mia_reply(
+            "here's a nude i picked for you",
+            heat="high",
+            commerce_action="offer_current",
+            commerce_media_type="photo",
+            commerce_explicitness="nude",
+        )
+        self.assertTrue(nude_photo.ok, nude_photo.reasons)
+
+        explicit_photo = validate_mia_reply(
+            "here's an explicit photo i picked for you",
+            heat="high",
+            commerce_action="offer_current",
+            commerce_media_type="photo",
+            commerce_explicitness="explicit",
+        )
+        self.assertTrue(explicit_photo.ok, explicit_photo.reasons)
+
+    def test_plural_inventory_claim_requires_a_structured_media_card(self):
+        claim = (
+            "i do have some videos but those are usually just for me or for "
+            "special occasions"
+        )
+
+        result = validate_mia_reply(claim, heat="high")
+
+        self.assertFalse(result.ok)
+        self.assertIn("unauthorized_media_claim", result.reasons)
+
+    def test_media_confirmation_allows_only_a_question_not_delivery_claims(self):
+        question = "are you sure you really want to see a picture of me?"
+        unauthorized = validate_mia_reply(question, heat="rising")
+        self.assertFalse(unauthorized.ok)
+        self.assertIn("unauthorized_media_claim", unauthorized.reasons)
+
+        authorized = validate_mia_reply(
+            question,
+            heat="rising",
+            commerce_action="ask_media_confirmation",
+        )
+        self.assertTrue(authorized.ok, authorized.reasons)
+
+        for claim in (
+            "i have a picture for you",
+            "i do have some videos but those are usually just for me",
+            "i can send it right now",
+            "here's a picture for you",
+        ):
+            with self.subTest(claim=claim):
+                result = validate_mia_reply(
+                    claim,
+                    heat="rising",
+                    commerce_action="ask_media_confirmation",
+                )
+                self.assertFalse(result.ok)
+                self.assertIn("unauthorized_media_claim", result.reasons)
+
+        missing_challenge = validate_mia_reply(
+            "i'll think about it",
+            heat="rising",
+            commerce_action="ask_media_confirmation",
+        )
+        self.assertFalse(missing_challenge.ok)
+        self.assertIn(
+            "media_confirmation_missing_challenge", missing_challenge.reasons
+        )
+
+    def test_unavailable_media_action_rejects_promises_and_behavior_tests(self):
+        for text, reason in (
+            ("deal, i'll send it", "unauthorized_media_claim"),
+            ("sending you one now", "unauthorized_media_claim"),
+            ("it's coming your way", "unauthorized_media_claim"),
+            ("maybe if you behave yourself", "media_unavailable_bargaining"),
+            ("you'll have to earn it", "media_unavailable_bargaining"),
+            ("i'll think about it", "media_unavailable_bargaining"),
+        ):
+            with self.subTest(text=text):
+                result = validate_mia_reply(
+                    text,
+                    heat="rising",
+                    commerce_action="media_request_unavailable",
+                )
+                self.assertFalse(result.ok)
+                self.assertIn(reason, result.reasons)
+
+        safe = validate_mia_reply(
+            "not this time, babe",
+            heat="rising",
+            commerce_action="media_request_unavailable",
+        )
+        self.assertTrue(safe.ok, safe.reasons)
+
+    def test_offer_claim_cannot_change_the_catalog_location(self):
+        offer = {
+            "heat": "high",
+            "commerce_action": "offer_fallback",
+            "commerce_media_type": "video",
+            "commerce_explicitness": "nude",
+            "commerce_media_description": "a synthetic test clip from her bathroom",
+            "commerce_media_locations": ("bathroom",),
+        }
+
+        wrong_room = validate_mia_reply(
+            "i have a video. one from my bedroom, when no one else was around",
+            **offer,
+        )
+        self.assertFalse(wrong_room.ok)
+        self.assertIn("media_offer_mismatch", wrong_room.reasons)
+
+        correct_room = validate_mia_reply(
+            "i have a video. one from my bathroom, when no one else was around",
+            **offer,
+        )
+        self.assertTrue(correct_room.ok, correct_room.reasons)
+
+        contextual_fallback = validate_mia_reply(
+            "i can't film a video in the bar right now, but here's a video from my bathroom",
+            **offer,
+        )
+        self.assertTrue(contextual_fallback.ok, contextual_fallback.reasons)
+
+        generic_home = validate_mia_reply(
+            "i have a video from home that i picked for you",
+            **offer,
+        )
+        self.assertTrue(generic_home.ok, generic_home.reasons)
+
+        wrong_current_origin = validate_mia_reply(
+            "i have a video from the bar that i picked for you",
+            **offer,
+        )
+        self.assertFalse(wrong_current_origin.ok)
+        self.assertIn("media_offer_mismatch", wrong_current_origin.reasons)
+
+        unrelated_location = validate_mia_reply(
+            "Tyler is in the bedroom, but i have a video from my bathroom for you",
+            **offer,
+        )
+        self.assertTrue(unrelated_location.ok, unrelated_location.reasons)
+
+        locationless = validate_mia_reply(
+            "i have a video i picked just for you",
+            **offer,
+        )
+        self.assertTrue(locationless.ok, locationless.reasons)
+
+        current_bar_item = validate_mia_reply(
+            "here's a photo from the bar that i picked for you",
+            heat="high",
+            commerce_action="offer_current",
+            commerce_media_type="photo",
+            commerce_explicitness="suggestive",
+            commerce_media_description="a teasing photo from behind the bar",
+            commerce_media_locations=("bar", "bathroom"),
+        )
+        self.assertTrue(current_bar_item.ok, current_bar_item.reasons)
+
+    def test_location_guard_covers_natural_card_shapes_without_false_context_links(self):
+        bathroom_offer = {
+            "heat": "high",
+            "commerce_action": "offer_fallback",
+            "commerce_media_type": "video",
+            "commerce_explicitness": "nude",
+            "commerce_media_description": "a synthetic test clip from her bathroom",
+            "commerce_media_locations": ("bathroom",),
+        }
+
+        for text in (
+            "here's a bedroom video",
+            "this video is from my bedroom",
+            "this one's from my bedroom",
+            "i made this in my bedroom",
+            "i can't wait, i have a video from my bedroom",
+            "Tyler can't see it, but i have a video from my bedroom",
+        ):
+            with self.subTest(text=text):
+                unauthorized = validate_mia_reply(text, heat="high")
+                self.assertFalse(unauthorized.ok)
+                self.assertIn("unauthorized_media_claim", unauthorized.reasons)
+
+                wrong_item = validate_mia_reply(text, **bathroom_offer)
+                self.assertFalse(wrong_item.ok)
+                self.assertIn("media_offer_mismatch", wrong_item.reasons)
+
+        for text in (
+            "i have a video for you, but i'm at work right now",
+            "i have a video for you. i'm at the bar",
+            "i have a video for you to watch in bed",
+            "i can't film a video in the bar right now, but here's a video from my bathroom",
+            "i can't currently film a video in the bar, but here's a video from my bathroom",
+            "i can't safely film a video in the bar, but here's a video from my bathroom",
+            "i can't film a quick video in the bar, but here's a video from my bathroom",
+            "i can't film a new nude video in the bar, but here's a video from my bathroom",
+            "this video is from my bathroom",
+            "this one's from my bathroom",
+            "i made this in my bathroom",
+        ):
+            with self.subTest(text=text):
+                result = validate_mia_reply(text, **bathroom_offer)
+                self.assertTrue(result.ok, result.reasons)
+
+    def test_media_references_and_user_requests_are_not_false_positives(self):
+        for text in (
+            "that photo you showed me was cute",
+            "i love concert photography",
+            "why... i thought you'd like the photo",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(validate_mia_reply(text, heat="high").ok)
+
+        self.assertTrue(
+            validate_user_suggestion("send me a photo", heat="high").ok
+        )
+
     def test_unicode_apostrophes_do_not_bypass_output_checks(self):
         cases = (
             ("I\u2019m an AI", "high", "ai_disclosure"),
@@ -269,29 +666,6 @@ class OutputBoundaryTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("user_boundary", result.reasons)
 
-    def test_withdrawal_cools_heat_but_negated_stop_does_not(self):
-        now = time.time()
-        prior = [
-            {"role": "user", "content": "fuck me", "timestamp": now},
-            {"role": "assistant", "content": "come closer", "timestamp": now},
-            {"role": "user", "content": "choke me", "timestamp": now},
-            {"role": "assistant", "content": "look at me", "timestamp": now},
-        ]
-        for text in (
-            "stop choking me",
-            "don't choke me",
-            "don't ever choke me",
-            "I don't want you to choke me",
-            "no choking",
-            "don't fuck me",
-            "stop please",
-        ):
-            stm = prior + [{"role": "user", "content": text, "timestamp": now}]
-            self.assertEqual(ChatEngine._conversation_heat(stm), "low")
-        for text in ("don't stop choking me", "never stop choking me"):
-            stm = prior + [{"role": "user", "content": text, "timestamp": now}]
-            self.assertEqual(ChatEngine._conversation_heat(stm), "high")
-
     def test_meta_prompt_is_not_promoted_to_a_boundary(self):
         result = validate_mia_reply(
             "that actually made me laugh",
@@ -308,6 +682,13 @@ class OutputBoundaryTests(unittest.TestCase):
         self.assertFalse(validate_user_suggestion("Mia: come here", heat="low").ok)
         self.assertFalse(validate_user_suggestion("I want to fuck you", heat="low").ok)
         self.assertTrue(validate_user_suggestion("tell me more about that", heat="low").ok)
+        blocked = validate_user_suggestion(
+            "I want to choke you",
+            heat="high",
+            blocked_acts=("choke",),
+        )
+        self.assertFalse(blocked.ok)
+        self.assertIn("user_boundary", blocked.reasons)
 
     def test_locked_heat_ceiling_catches_explicit_terms_without_wet_weather_collision(self):
         explicit = (
@@ -403,10 +784,13 @@ class BatchFailureDeliveryTests(unittest.IsolatedAsyncioTestCase):
         engine._process_sexting = AsyncMock(side_effect=RuntimeError("provider down"))
         callback = AsyncMock()
 
-        with self.assertLogs("bot.chat_engine", level="ERROR") as logs:
-            await engine._batch_collect(7, callback)
+        persisted = AsyncMock()
+        with patch("bot.chat_engine.add_message", persisted):
+            with self.assertLogs("bot.chat_engine", level="ERROR") as logs:
+                await engine._batch_collect(7, callback)
 
         callback.assert_awaited_once()
+        persisted.assert_awaited_once()
         delivered = callback.await_args.args[0]
         self.assertIsInstance(delivered, ChatResponse)
         self.assertEqual(len(delivered.messages), 1)
@@ -425,7 +809,11 @@ class BatchFailureDeliveryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("bot.chat_engine", level="ERROR") as logs:
             await engine._batch_collect(8, callback)
 
-        engine._process_sexting.assert_awaited_once_with(8, "hello")
+        engine._process_sexting.assert_awaited_once_with(
+            8,
+            "hello",
+            raw_texts=["hello"],
+        )
         callback.assert_awaited_once_with(response)
         self.assertTrue(
             any("Batch response callback failed" in line for line in logs.output)
@@ -446,6 +834,10 @@ class SuggestionFlowTests(unittest.IsolatedAsyncioTestCase):
             patch("bot.chat_engine.get_recent_messages", new=AsyncMock(return_value=stm)),
             patch("bot.chat_engine.get_user_name", new=AsyncMock(return_value=name)),
             patch("bot.chat_engine.get_facts", new=AsyncMock(return_value=facts or [])),
+            patch(
+                "bot.chat_engine.get_engagement_state",
+                new=AsyncMock(return_value={"heat_stage": "low", "heat_progress": 0}),
+            ),
         ):
             return await engine.suggest_reply(1)
 

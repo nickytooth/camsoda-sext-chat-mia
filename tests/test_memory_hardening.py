@@ -94,6 +94,53 @@ class MemorySchemaTests(unittest.TestCase):
         with self.assertRaises(MemoryValidationError):
             summarizer._validate_summary_payload(injected, _messages())
 
+    def test_temporary_paywall_decline_is_not_persisted_as_a_boundary(self):
+        source = [{
+            "id": 21,
+            "role": "user",
+            "content": "don't send me content right now",
+            "timestamp": 200.0,
+            "mode": "sexting",
+            "tag": None,
+        }]
+        payload = {
+            "memories": [{
+                "category": "preference",
+                "content": "User does not want media offers",
+                "importance": 8,
+                "source_message_ids": [21],
+            }],
+            "facts": [{
+                "key": "boundaries",
+                "value": "do not send content",
+                "source_message_ids": [21],
+            }],
+        }
+        self.assertEqual(
+            summarizer._validate_summary_payload(payload, source),
+            ([], []),
+        )
+
+    def test_concrete_media_preference_remains_durable(self):
+        source = [{
+            "id": 22,
+            "role": "user",
+            "content": "I don't like feet photos",
+            "timestamp": 201.0,
+            "mode": "sexting",
+            "tag": None,
+        }]
+        payload = {
+            "memories": [],
+            "facts": [{
+                "key": "turn_offs",
+                "value": "feet",
+                "source_message_ids": [22],
+            }],
+        }
+        _, facts = summarizer._validate_summary_payload(payload, source)
+        self.assertEqual(facts[0]["value"], "feet")
+
     def test_fact_key_and_value_control_terms_are_rejected(self):
         self.assertEqual(validate_fact_key("favorite_color"), "favorite_color")
         with self.assertRaises(MemoryValidationError):

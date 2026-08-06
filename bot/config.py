@@ -24,6 +24,76 @@ STORIES_FILE = BASE_DIR / os.getenv("STORIES_FILE", "library/stories.yaml")
 # count (see library/tyler_arc.yaml).
 TYLER_ARC_FILE = BASE_DIR / os.getenv("TYLER_ARC_FILE", "library/tyler_arc.yaml")
 
+# Visual content commerce. The catalog contains metadata and private object
+# keys only; object delivery is handled separately and must entitlement-check
+# before issuing a short-lived URL for the full asset.
+_configured_media_catalog = os.getenv("MEDIA_CATALOG_FILE")
+_private_media_catalog = BASE_DIR / ".private-media" / "media_catalog.yaml"
+MEDIA_CATALOG_FILE = (
+    BASE_DIR / _configured_media_catalog
+    if _configured_media_catalog
+    else (
+        _private_media_catalog
+        if _private_media_catalog.exists()
+        else BASE_DIR / "library" / "media_catalog.yaml"
+    )
+)
+MEDIA_PHOTO_PRICE_TOKENS = int(os.getenv("MEDIA_PHOTO_PRICE_TOKENS", "5"))
+MEDIA_VIDEO_PRICE_TOKENS = int(os.getenv("MEDIA_VIDEO_PRICE_TOKENS", "10"))
+DEMO_WALLET_INITIAL_TOKENS = int(os.getenv("DEMO_WALLET_INITIAL_TOKENS", "1000"))
+DEMO_WALLET_REFILL_TOKENS = int(os.getenv("DEMO_WALLET_REFILL_TOKENS", "1000"))
+
+# Sales pacing is counted in processed debounce batches (engagement_state's
+# total_messages), never in the raw ingestion counter.
+MEDIA_PROACTIVE_MIN_BATCHES = int(os.getenv("MEDIA_PROACTIVE_MIN_BATCHES", "8"))
+MEDIA_PROACTIVE_COOLDOWN_BATCHES = int(
+    os.getenv("MEDIA_PROACTIVE_COOLDOWN_BATCHES", "8")
+)
+MEDIA_REPEAT_COOLDOWN_BATCHES = int(os.getenv("MEDIA_REPEAT_COOLDOWN_BATCHES", "8"))
+MEDIA_SOFT_DECLINE_MIN_BATCHES = int(
+    os.getenv("MEDIA_SOFT_DECLINE_MIN_BATCHES", "30")
+)
+MEDIA_SOFT_DECLINE_MAX_BATCHES = int(
+    os.getenv("MEDIA_SOFT_DECLINE_MAX_BATCHES", "40")
+)
+MEDIA_HARD_DECLINE_SNOOZE_BATCHES = int(
+    os.getenv("MEDIA_HARD_DECLINE_SNOOZE_BATCHES", "100")
+)
+
+# A direct visual request is confirmed in chat before a paywall card is
+# attached.  The pending request is deliberately short-lived, while a granted
+# confirmation remains valid for the current conversational session so Mia
+# does not repeat the same "are you sure?" beat on every request.
+MEDIA_CONFIRMATION_TTL_SECONDS = int(
+    os.getenv("MEDIA_CONFIRMATION_TTL_SECONDS", "600")
+)
+MEDIA_CONFIRMATION_MAX_BATCH_GAP = int(
+    os.getenv("MEDIA_CONFIRMATION_MAX_BATCH_GAP", "4")
+)
+MEDIA_CONFIRMATION_GRANT_SECONDS = int(
+    os.getenv("MEDIA_CONFIRMATION_GRANT_SECONDS", "3600")
+)
+
+# Cloudflare R2 credentials. Full objects belong in a private bucket. These
+# values are intentionally empty by default so local development can use a
+# delivery adapter without accidentally exposing a bucket.
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
+R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "")
+R2_SIGNED_PHOTO_TTL_SECONDS = int(
+    os.getenv("R2_SIGNED_PHOTO_TTL_SECONDS", "600")
+)
+R2_SIGNED_VIDEO_TTL_SECONDS = int(
+    os.getenv("R2_SIGNED_VIDEO_TTL_SECONDS", "3600")
+)
+R2_SIGNED_PREVIEW_TTL_SECONDS = int(
+    os.getenv("R2_SIGNED_PREVIEW_TTL_SECONDS", "3600")
+)
+COMMERCE_DEV_RESET_ENABLED = os.getenv(
+    "COMMERCE_DEV_RESET_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+
 # xAI / Grok (NSFW)
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 XAI_MODEL = os.getenv("XAI_MODEL", "grok-4.3")
@@ -47,6 +117,11 @@ SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
 # Sexting batching is a debounce: she replies this many seconds after the
 # user's LAST message; every new message resets the countdown.
 SEXTING_DEBOUNCE_SECONDS = float(os.getenv("SEXTING_DEBOUNCE_SECONDS", "5"))
+
+# A rising/high sexual session cools back to the normal flirty register when
+# the user has not sent another sexual processed batch for this long.  Normal
+# chat batches do not decrement the persistent rising state on their own.
+HEAT_SESSION_TIMEOUT_SECONDS = int(os.getenv("HEAT_SESSION_TIMEOUT_SECONDS", "3600"))
 
 # Max seconds to wait for a single LLM generation before treating it as a
 # failure and falling back. Prevents a hung provider request from freezing the

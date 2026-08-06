@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { Check, CheckCheck } from "lucide-react";
-import { ChatMessage } from "../hooks/useChat";
+import type { TextChatMessage } from "../hooks/useChat";
 
 function formatTime(ts: number): string {
   const d = new Date(ts * 1000);
@@ -10,7 +10,7 @@ function formatTime(ts: number): string {
 }
 
 interface Props {
-  message: ChatMessage;
+  message: TextChatMessage;
   showReceipt?: boolean;
   read?: boolean;
 }

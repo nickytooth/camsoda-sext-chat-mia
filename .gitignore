@@ -1,4 +1,6 @@
 .env
+.env.local
+.env.*.local
 env
 data/
 .claude/
@@ -11,6 +13,17 @@ __pycache__/
 venv/
 content_index.json
 check_*.py
+
+# Private visual-commerce sources and generated derivatives
+.private-media/
+.media-build/
+.tmp_*
+.preview-*.log
+.*.publish.lock
+.env.media*.local
+library/media_catalog.local.yaml
+library/media_catalog.private.yaml
+frontend/public/media/
 
 # Frontend (Next.js)
 node_modules/

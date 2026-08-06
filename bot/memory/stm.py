@@ -30,17 +30,52 @@ async def add_message(
     content: str,
     mode: str = "sexting",
     tag: str | None = None,
-) -> None:
+) -> int:
     """Persist a message. `tag` marks special content (e.g. 'fantasy_card' /
-    'story_card') so the summarizer can treat it as fiction, not real events."""
+    'story_card') so the summarizer can treat it as fiction, not real events.
+
+    Returns the durable row ID so callers that coordinate a second-phase
+    operation (such as finalizing a reserved media offer) can compensate the
+    exact message if that operation fails.
+    """
     conn = await get_connection()
     try:
-        await conn.execute(
+        cursor = await conn.execute(
             "INSERT INTO messages (user_id, role, content, timestamp, mode, tag) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
             (user_id, role, content, time.time(), mode, tag),
         )
+        row = await cursor.fetchone()
+        if row is None:
+            raise RuntimeError("Persisted message did not return an ID")
         await conn.commit()
+        return int(row["id"])
+    finally:
+        await conn.close()
+
+
+async def replace_assistant_message(
+    message_id: int,
+    user_id: int,
+    content: str,
+) -> bool:
+    """Replace one exact assistant row during a failed two-phase delivery.
+
+    The user/role predicates prevent a compensating commerce write from ever
+    touching user-authored content or another account's message.
+    """
+    if type(message_id) is not int or message_id <= 0:
+        return False
+    conn = await get_connection()
+    try:
+        cursor = await conn.execute(
+            "UPDATE messages SET content = ? "
+            "WHERE id = ? AND user_id = ? AND role = 'assistant' RETURNING id",
+            (content, message_id, user_id),
+        )
+        row = await cursor.fetchone()
+        await conn.commit()
+        return row is not None
     finally:
         await conn.close()
 
@@ -201,16 +236,18 @@ async def get_all_messages(user_id: int, mode: str = "sexting") -> list[dict]:
     conn = await get_connection()
     try:
         cursor = await conn.execute(
-            "SELECT role, content, timestamp FROM messages "
+            "SELECT id, role, content, timestamp, mode FROM messages "
             "WHERE user_id = ? AND mode = ? ORDER BY timestamp ASC, id ASC",
             (user_id, mode),
         )
         rows = await cursor.fetchall()
         return [
             {
+                "id": row["id"],
                 "role": row["role"],
                 "content": row["content"],
                 "timestamp": row["timestamp"],
+                "mode": row["mode"],
             }
             for row in rows
         ]
