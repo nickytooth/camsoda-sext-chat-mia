@@ -154,6 +154,60 @@ _MEDIA_OFFER_SELF_ORIGIN_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Planner/search vocabulary is useful inside the backend but immediately
+# breaks Mia's voice when copied into chat.  Reject it while a real offer is
+# authorised so the normal provider retry can rewrite the line naturally.
+_MEDIA_OFFER_INVENTORY_VOICE_RE = re.compile(
+    r"\b(?:"
+    r"exact\s+[a-z][a-z _-]{0,40}\s+variation|"
+    r"closest\s+available(?:\s+(?:match|alternative|option))?|"
+    r"available\s+type\s+alternative|"
+    r"selected\s+(?:alternative|item|media|file)|"
+    r"backend[- ]selected|semantic\s+(?:match|mismatch)|"
+    r"requested\s+media\s+type|media\s+inventory|catalog\s+(?:item|match)|"
+    r"content\s+item|inventory|search\s+result|"
+    r"(?:top|best|first)\s+(?:result|match|option)"
+    r")\b",
+    re.IGNORECASE,
+)
+_MEDIA_OFFER_STACKED_LABEL_RE = re.compile(
+    r"\b(?:(?:private|nude|explicit|suggestive|teasing|playful|intimate|"
+    r"dominant|submissive|risky)\s+){2,}"
+    r"(?:photo|pic|picture|shot|selfie|video|clip)\b",
+    re.IGNORECASE,
+)
+
+
+def _echoes_catalog_description(text: str, description: object | None) -> bool:
+    """Detect label-like verbatim metadata without banning ordinary media words."""
+
+    label = " ".join(str(description or "").split()).strip(" ,.;").lower()
+    visible = " ".join(_text_for_checks(text).split()).lower()
+    if label and _MEDIA_OFFER_STACKED_LABEL_RE.search(visible):
+        return True
+    if len(label.split()) < 5 or len(label) < 24:
+        return False
+    if not re.search(
+        r"\b(?:private|nude|explicit|suggestive|teasing|playful|intimate|"
+        r"dominant|submissive|risky|mirror|closeup|full[- ]body|pov|tripod)\b",
+        label,
+        re.IGNORECASE,
+    ):
+        # A simple factual phrase such as "a photo I took from my bed" can be
+        # perfectly natural. The problem is echoing curated label vocabulary.
+        return False
+    variants = {
+        label,
+        re.sub(r"^(?:a|an|the)\s+", "", label),
+    }
+    for variant in tuple(variants):
+        variants.add(re.sub(r"\bfrom\s+my\s+", "from the ", variant))
+        variants.add(re.sub(r"\bfrom\s+the\s+", "from my ", variant))
+    return any(
+        len(variant.split()) >= 4 and variant in visible
+        for variant in variants
+    )
+
 
 def _has_third_person_offer_self_reference(text: str) -> bool:
     if _MEDIA_OFFER_MIA_NAME_RE.search(text):
@@ -1080,6 +1134,13 @@ def validate_mia_reply(
         reasons.append("unauthorized_media_claim")
     if offer_authorized and _has_third_person_offer_self_reference(check_value):
         reasons.append("media_offer_third_person_voice")
+    if offer_authorized and _MEDIA_OFFER_INVENTORY_VOICE_RE.search(check_value):
+        reasons.append("media_offer_inventory_voice")
+    if offer_authorized and _echoes_catalog_description(
+        check_value,
+        commerce_media_description,
+    ):
+        reasons.append("media_offer_catalog_voice")
     if unavailable_action and _MEDIA_CONTEXTUAL_DELIVERY_RE.search(check_value):
         reasons.append("unauthorized_media_claim")
     if unavailable_action and _MEDIA_UNAVAILABLE_BARGAIN_RE.search(check_value):
@@ -1281,6 +1342,20 @@ def correction_prompt(
         constraints.append(
             "Describe your own offered item only in first person with I, me, and my. "
             "Never call yourself Mia or use she/her for yourself or the item."
+        )
+    if "media_offer_inventory_voice" in reasons:
+        constraints.append(
+            "Rewrite the offer in Mia's casual texting voice. Do not repeat planner or "
+            "inventory language such as variation, closest available match, selected "
+            "alternative, semantic match, catalog item, top result, inventory, or content "
+            "item. Use natural words "
+            "such as angle, shot, pic, clip, fresh one, or this one."
+        )
+    if "media_offer_catalog_voice" in reasons:
+        constraints.append(
+            "Use the selected item's description only as factual boundaries. Do not repeat "
+            "the catalog-like noun phrase verbatim; introduce it naturally with wording such "
+            "as this one, this pic, or this clip."
         )
     if "commerce_price_claim" in reasons:
         constraints.append(

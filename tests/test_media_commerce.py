@@ -548,7 +548,7 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("from my bedroom", decision.offered_item_description)
         self.assertIn("from her bedroom", decision.offer.description)
         self.assertEqual(decision.current_context, "")
-        self.assertIn("special moment", decision.brief)
+        self.assertNotIn("special moment", decision.brief.lower())
         self.assertNotIn("Tyler", decision.brief)
 
     async def test_live_past_only_match_uses_grounded_blocker_and_fallback(self):
@@ -563,7 +563,11 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
         self.assertEqual(decision.offer.content_id, "mia_private_nude_001")
         self.assertIn("Tyler is on the couch", decision.current_context)
-        self.assertIn("I cannot capture", decision.current_context)
+        self.assertIn("fresh", decision.current_context.lower())
+        self.assertIn("right now", decision.current_context.lower())
+        self.assertEqual(decision.fallback_kind, "live_blocked")
+        self.assertIn("Tyler is on the couch", decision.live_capture_blocker)
+        self.assertEqual(decision.live_capture_blocker_kind, "tyler")
         self.assertNotIn(" she ", f" {decision.current_context.lower()} ")
         self.assertIn("from my bedroom", decision.offered_item_description)
 
@@ -577,7 +581,11 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
-        self.assertIn("I do not have a fresh version", decision.current_context)
+        self.assertIn("fresh", decision.current_context.lower())
+        self.assertIn("right now", decision.current_context.lower())
+        self.assertEqual(decision.fallback_kind, "live_unavailable")
+        self.assertEqual(decision.live_capture_blocker, "")
+        self.assertEqual(decision.live_capture_blocker_kind, "")
         for invented in ("Tyler", "friend", "girl", "customer", "coworker"):
             self.assertNotIn(invented, decision.current_context)
 
@@ -635,6 +643,8 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.offer.content_id, "mia_club_clip_001")
         self.assertEqual(decision.offer.media_type, "video")
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+        self.assertEqual(decision.fallback_kind, "type_swap")
+        self.assertEqual(decision.requested_media_type, "photo")
 
     async def test_exact_alternate_photo_beats_unrelated_requested_video(self):
         decision = await self.service.plan_commerce_turn(
@@ -648,6 +658,8 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.offer.content_id, "mia_bar_001")
         self.assertEqual(decision.offer.media_type, "photo")
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+        self.assertEqual(decision.fallback_kind, "type_swap")
+        self.assertEqual(decision.requested_media_type, "video")
 
     async def test_exact_requested_type_remains_ahead_of_exact_alternate_type(self):
         decision = await self.service.plan_commerce_turn(
@@ -722,6 +734,10 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(decision.offer.content_id, "mia_bar_001")
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+        self.assertEqual(decision.fallback_kind, "semantic_near_match")
+        self.assertIn("home", decision.requested_detail)
+        for phrase in ("variation", "closest available match"):
+            self.assertNotIn(phrase, decision.current_context.lower())
 
     async def test_unlocked_current_item_is_excluded_and_exact_saved_item_needs_no_excuse(self):
         self.repository.unlocked.add("mia_bar_001")
@@ -735,15 +751,19 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.current_locations, ("bar", "stockroom"))
         self.assertEqual(decision.current_context, "")
 
-    async def test_fallback_explains_both_location_and_requested_type_mismatch(self):
+    async def test_type_fallback_uses_one_structured_human_reason(self):
         self.repository.unlocked.add("mia_club_clip_001")
         decision = await self.service.plan_commerce_turn(
             1, "send a video", batch_number=1, heat="rising", period="bar_shift"
         )
         self.assertEqual(decision.offer.media_type, "photo")
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
-        self.assertIn("I do not have that as a video", decision.brief)
-        self.assertIn("exactly that as a photo", decision.brief)
+        self.assertEqual(decision.fallback_kind, "type_swap")
+        self.assertEqual(decision.requested_media_type, "video")
+        self.assertIn("video", decision.current_context.lower())
+        self.assertIn("photo", decision.current_context.lower())
+        self.assertNotIn("customers", decision.current_context.lower())
+        self.assertNotIn("closest available", decision.current_context.lower())
 
     async def test_generic_request_starts_photo_then_alternates_video(self):
         first = await self.service.plan_commerce_turn(

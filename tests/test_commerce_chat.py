@@ -6,7 +6,7 @@ from bot.chat_engine import ChatEngine, ChatResponse
 from bot.heat import HeatState, HeatTurnResult
 from bot.media_commerce import CommerceAction, CommerceDecision, MediaOffer
 from bot.memory.stm import add_message, replace_assistant_message
-from bot.output_guard import validate_mia_reply
+from bot.output_guard import correction_prompt, validate_mia_reply
 from bot.persona import Persona
 
 
@@ -80,6 +80,88 @@ class MessageCompensationStorageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CommerceAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def test_offer_guard_rejects_inventory_voice_but_allows_natural_mismatch_copy(self):
+        for jargon in (
+            "this is the closest available match",
+            "i picked the selected alternative",
+            "this is the available type alternative",
+            "i do not have the exact ass variation",
+            "this was the top result in my inventory",
+            "this was the first search result",
+        ):
+            with self.subTest(jargon=jargon):
+                result = validate_mia_reply(
+                    jargon,
+                    heat="high",
+                    commerce_action="offer_fallback",
+                )
+                self.assertIn("media_offer_inventory_voice", result.reasons)
+
+        natural = validate_mia_reply(
+            "not quite the angle you asked for, but this one is still trouble",
+            heat="high",
+            commerce_action="offer_fallback",
+        )
+        self.assertNotIn("media_offer_inventory_voice", natural.reasons)
+
+        retry = correction_prompt(("media_offer_inventory_voice",), "high")
+        self.assertIn("casual texting voice", retry)
+        self.assertIn("closest available match", retry)
+        self.assertIn("angle", retry)
+
+    def test_offer_guard_rejects_a_verbatim_catalog_label(self):
+        label = "a private nude selfie from my bed"
+        robotic = validate_mia_reply(
+            f"god... i picked {label} for you",
+            heat="high",
+            commerce_action="offer_saved",
+            commerce_media_type="photo",
+            commerce_explicitness="nude",
+            commerce_media_description=label,
+            commerce_media_locations=("bedroom",),
+        )
+        self.assertIn("media_offer_catalog_voice", robotic.reasons)
+
+        determiner_swap = validate_mia_reply(
+            "not quite the angle, but i got this private nude selfie from my bed",
+            heat="high",
+            commerce_action="offer_fallback",
+            commerce_media_type="photo",
+            commerce_explicitness="nude",
+            commerce_media_description=label,
+            commerce_media_locations=("bedroom",),
+        )
+        self.assertIn("media_offer_catalog_voice", determiner_swap.reasons)
+
+        origin_determiner_swap = validate_mia_reply(
+            "not quite the angle, but i got this private nude selfie from the bed",
+            heat="high",
+            commerce_action="offer_fallback",
+            commerce_media_type="photo",
+            commerce_explicitness="nude",
+            commerce_media_description=label,
+            commerce_media_locations=("bedroom",),
+        )
+        self.assertIn(
+            "media_offer_catalog_voice",
+            origin_determiner_swap.reasons,
+        )
+
+        natural = validate_mia_reply(
+            "god... open this before i change my mind",
+            heat="high",
+            commerce_action="offer_saved",
+            commerce_media_type="photo",
+            commerce_explicitness="nude",
+            commerce_media_description=label,
+            commerce_media_locations=("bedroom",),
+        )
+        self.assertNotIn("media_offer_catalog_voice", natural.reasons)
+
+        retry = correction_prompt(("media_offer_catalog_voice",), "high")
+        self.assertIn("Do not repeat", retry)
+        self.assertIn("this pic", retry)
+
     async def test_generation_rejects_unbacked_media_claim_but_allows_offer_claim(self):
         primary = StubProvider()
         primary.generate = AsyncMock(return_value="here's a photo i picked for you")
@@ -633,8 +715,8 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         with ExitStack() as stack:
             for turn_patch in self._patch_turn_dependencies(
                 generated=(
-                    "ohhh, you really wanna see it?\n"
-                    "i kept this private photo from my bed for a special moment"
+                    "ohhh, you really know what to ask for\n"
+                    "open this before i change my mind"
                 )
             ):
                 stack.enter_context(turn_patch)
@@ -646,7 +728,8 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.media_offer["offer_id"], 43)
         self.assertEqual(len(response.messages), 1)
         visible = response.messages[0]
-        self.assertIn("kept this private photo", visible)
+        self.assertIn("open this", visible)
+        self.assertNotIn("special moment", visible.lower())
         self.assertNotIn("Tyler", visible)
         self.assertNotIn("can't take", visible)
 
@@ -688,7 +771,9 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.commerce_action, "offer_saved")
         self.assertEqual(response.media_offer["offer_id"], 44)
         self.assertEqual(len(response.messages), 1)
-        self.assertIn("private photo from my bed", response.messages[0])
+        self.assertNotIn("private photo from my bed", response.messages[0])
+        self.assertNotIn("special moment", response.messages[0])
+        self.assertTrue(response.messages[0].strip())
 
     async def test_direct_fallback_offer_is_two_bubbles_with_card(self):
         fallback_offer = offer_payload(42)
@@ -732,7 +817,741 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(response.messages), 2)
         visible = "\n".join(response.messages)
         self.assertIn("customers are around at the bar", visible)
-        self.assertIn("private photo from my bathroom", visible)
+        self.assertIn("saved pic", visible)
+        self.assertNotIn("private photo from my bathroom", visible)
+
+    async def _run_natural_fallback_copy(
+        self,
+        *,
+        current_context,
+        generated,
+        media_type="photo",
+        description="a private photo from her bedroom",
+        fallback_kind="semantic_near_match",
+        requested_detail="",
+        requested_media_type="",
+        live_capture_blocker="",
+        live_capture_blocker_kind="",
+        current_locations=(),
+    ):
+        fallback_offer = offer_payload(45)
+        fallback_offer.update(
+            content_id="mia_fallback_001",
+            media_type=media_type,
+            price_tokens=10 if media_type == "video" else 5,
+            duration_seconds=15 if media_type == "video" else None,
+            description=description,
+        )
+
+        async def plan_fallback(user_id, text, *, batch_number, heat, period):
+            self.events.append(("plan", batch_number, period))
+            return {
+                "action": "offer_fallback",
+                "brief": "offer the truthful fallback without inventory jargon",
+                "current_context": current_context,
+                "offered_item_description": description,
+                "fallback_kind": fallback_kind,
+                "requested_detail": requested_detail,
+                "requested_media_type": requested_media_type,
+                "live_capture_blocker": live_capture_blocker,
+                "live_capture_blocker_kind": live_capture_blocker_kind,
+                "current_locations": current_locations,
+                "offer": fallback_offer,
+            }
+
+        async def finalize_fallback(offer_id):
+            self.events.append(("finalize", offer_id))
+            return fallback_offer
+
+        self.service.plan_commerce_turn = plan_fallback
+        self.service.mark_offer_delivered = finalize_fallback
+        with ExitStack() as stack:
+            for turn_patch in self._patch_turn_dependencies(generated=generated):
+                stack.enter_context(turn_patch)
+            return await self.engine._process_sexting(23, "show me a sexy photo")
+
+    def assertNoInventoryJargon(self, text):
+        lowered = text.lower()
+        for phrase in (
+            "variation",
+            "closest available match",
+            "selected alternative",
+            "available type alternative",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, lowered)
+
+    async def test_semantic_fallback_keeps_two_bubbles_without_inventory_jargon(self):
+        response = await self._run_natural_fallback_copy(
+            current_context=(
+                "she does not have the exact ass variation; this is the closest "
+                "available match"
+            ),
+            generated=(
+                "straight to my ass? you're getting brave\n"
+                "not quite the angle you asked for, but this one is not a downgrade"
+            ),
+            requested_detail="ass",
+        )
+
+        self.assertEqual(response.commerce_action, "offer_fallback")
+        self.assertEqual(len(response.messages), 2)
+        self.assertNoInventoryJargon(response.messages[1])
+        self.assertTrue(
+            any(
+                phrase in response.messages[1].lower()
+                for phrase in ("angle", "shot", "not quite", "asked for")
+            ),
+            response.messages[1],
+        )
+
+    async def test_semantic_fallback_replaces_model_inventory_voice(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="this is not quite the ass shot he asked for",
+            generated=(
+                "straight to my ass? you're getting brave\n"
+                "i do not have the exact ass variation; this is the closest "
+                "available match"
+            ),
+            requested_detail="ass",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        self.assertNoInventoryJargon(response.messages[1])
+        self.assertIn("ass", response.messages[1].lower())
+
+    async def test_semantic_fallback_replaces_catalog_label_echo(self):
+        generated_variants = (
+            "this isn't quite the ass shot but i got this private nude clip "
+            "from my bathroom",
+            "this isn't quite the ass shot but i got this private nude clip "
+            "from the bathroom",
+            "this isn't quite the ass shot but this private nude clip is better",
+        )
+        for generated_second in generated_variants:
+            with self.subTest(generated_second=generated_second):
+                response = await self._run_natural_fallback_copy(
+                    current_context="this is not quite the ass shot he asked for",
+                    generated=(
+                        "ohhh you really wanna see that huh?\n"
+                        f"{generated_second}"
+                    ),
+                    media_type="video",
+                    description="a private nude clip from my bathroom",
+                    fallback_kind="semantic_near_match",
+                    requested_detail="ass",
+                )
+
+                self.assertEqual(len(response.messages), 2)
+                second = response.messages[1].lower()
+                self.assertIn("ass", second)
+                self.assertNotIn("private nude clip", second)
+                self.assertNotIn("bathroom", second)
+
+    async def test_semantic_fallback_preserves_natural_clip_reference(self):
+        natural_variants = (
+            "not quite the ass shot... but this clip is gonna make up for it",
+            "not quite the ass shot... but this private clip is better",
+            "not quite the ass shot... but this nude clip is better",
+            "not quite the ass shot... but this clip from my bathroom is better",
+        )
+        for natural in natural_variants:
+            with self.subTest(natural=natural):
+                response = await self._run_natural_fallback_copy(
+                    current_context="this is not quite the ass shot he asked for",
+                    generated=f"ohhh you really wanna see that huh?\n{natural}",
+                    media_type="video",
+                    description="a private nude clip from my bathroom",
+                    fallback_kind="semantic_near_match",
+                    requested_detail="ass",
+                )
+
+                self.assertEqual(response.messages[1], natural)
+
+    async def test_non_live_fallback_drops_an_invented_nearby_person(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="this is not quite the ass shot he asked for",
+            generated=(
+                "straight to my ass? you're getting brave\n"
+                "Tyler's beside me, so it's not quite the angle you asked for"
+            ),
+            requested_detail="ass",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        self.assertNotIn("tyler", response.messages[1].lower())
+        self.assertIn("ass", response.messages[1].lower())
+
+    async def test_type_swap_names_both_types_without_inventory_jargon(self):
+        response = await self._run_natural_fallback_copy(
+            current_context=(
+                "she does not have a matching photo; this video is the closest "
+                "available type alternative"
+            ),
+            generated=(
+                "you really want to see that?\n"
+                "i don't have that as a photo, but the video is even better"
+            ),
+            media_type="video",
+            description="a private video from her bathroom",
+            fallback_kind="type_swap",
+            requested_media_type="photo",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        second = response.messages[1].lower()
+        self.assertIn("photo", second)
+        self.assertIn("video", second)
+        self.assertNoInventoryJargon(second)
+
+    async def test_live_fallback_preserves_the_grounded_blocker_naturally(self):
+        response = await self._run_natural_fallback_copy(
+            current_context=(
+                "Tyler is on the couch in the next room, so she cannot capture "
+                "the requested fresh version right now"
+            ),
+            generated=(
+                "ohhh, you want a fresh one right now?\n"
+                "Tyler's on the couch in the next room, so i'm not taking one rn... "
+                "but i have something saved for you"
+            ),
+            fallback_kind="live_blocked",
+            live_capture_blocker="Tyler is on the couch in the next room",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        second = response.messages[1].lower()
+        self.assertIn("tyler", second)
+        self.assertTrue("couch" in second or "next room" in second, second)
+        self.assertNoInventoryJargon(second)
+
+    async def test_live_blocked_does_not_let_bar_term_ground_invented_tyler(self):
+        response = await self._run_natural_fallback_copy(
+            current_context=(
+                "customers are around at the bar, so she cannot capture the "
+                "requested fresh version right now"
+            ),
+            generated=(
+                "ohhh, you want me to take one here at the bar?\n"
+                "Tyler's at the bar, so i can't take a fresh one rn... but i have "
+                "something saved"
+            ),
+            fallback_kind="live_blocked",
+            live_capture_blocker="customers are around at the bar",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        visible = "\n".join(response.messages).lower()
+        self.assertNotIn("tyler", visible)
+        self.assertTrue(
+            "customers" in response.messages[1].lower()
+            or "bar" in response.messages[1].lower(),
+            response.messages[1],
+        )
+
+    async def test_live_blocked_rejects_roommate_when_tyler_is_the_blocker(self):
+        response = await self._run_natural_fallback_copy(
+            current_context=(
+                "Tyler is on the couch in the next room, so she cannot capture "
+                "the requested fresh version right now"
+            ),
+            generated=(
+                "ohhh, you want a fresh one right now?\n"
+                "my roommate's on the couch, so i can't take one rn... but i have "
+                "something saved"
+            ),
+            fallback_kind="live_blocked",
+            live_capture_blocker="Tyler is on the couch in the next room",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        second = response.messages[1].lower()
+        self.assertNotIn("roommate", second)
+        self.assertIn("tyler", second)
+        self.assertTrue("couch" in second or "next room" in second, second)
+
+    async def test_live_blocked_rejects_a_wrong_location_with_the_right_crowd(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="customers are around at the bar",
+            generated=(
+                "ohhh, you want a fresh one?\n"
+                "the gym is full of people so i can't take a fresh one rn... but open this"
+            ),
+            fallback_kind="live_blocked",
+            live_capture_blocker="customers are around at the bar",
+            live_capture_blocker_kind="work_crowd",
+            current_locations=("bar", "stockroom"),
+        )
+
+        visible = "\n".join(response.messages).lower()
+        self.assertNotIn("gym", visible)
+        self.assertIn("customers", response.messages[1].lower())
+
+    async def test_live_blocked_rejects_tyler_at_an_ungrounded_location(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="Tyler is asleep beside her",
+            generated=(
+                "ohhh, you want a fresh one?\n"
+                "Tyler's at the bar so i can't take a fresh one rn... but open this"
+            ),
+            fallback_kind="live_blocked",
+            live_capture_blocker="Tyler is asleep beside her",
+            live_capture_blocker_kind="tyler",
+            current_locations=("bedroom", "home"),
+        )
+
+        second = response.messages[1].lower()
+        self.assertNotIn("bar", second)
+        self.assertIn("tyler", second)
+
+    async def test_live_blocked_replaces_unsafe_person_and_location_in_lead_bubble(self):
+        response = await self._run_natural_fallback_copy(
+            current_context=(
+                "customers are around at the bar, so she cannot capture the "
+                "requested fresh version right now"
+            ),
+            generated=(
+                "i'm at the beach with my friend and you want a fresh one?\n"
+                "customers are all around me at the bar, so i can't take one rn... "
+                "but i have something saved"
+            ),
+            fallback_kind="live_blocked",
+            live_capture_blocker="customers are around at the bar",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        visible = "\n".join(response.messages).lower()
+        self.assertNotIn("friend", visible)
+        self.assertNotIn("beach", visible)
+        self.assertTrue(
+            "customers" in response.messages[1].lower()
+            or "bar" in response.messages[1].lower(),
+            response.messages[1],
+        )
+
+    async def test_live_unavailable_replaces_invented_person_and_current_scene(self):
+        response = await self._run_natural_fallback_copy(
+            current_context=(
+                "she has no fresh version in the requested angle right now"
+            ),
+            generated=(
+                "i'm at the club with my friend and you want one right now?\n"
+                "my friend's beside me at the club, so i can't take a fresh one... "
+                "but i have something saved"
+            ),
+            fallback_kind="live_unavailable",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        visible = "\n".join(response.messages).lower()
+        self.assertNotIn("friend", visible)
+        self.assertNotIn("club", visible)
+        self.assertTrue(
+            any(term in response.messages[1].lower() for term in ("fresh", "right now", "rn")),
+            response.messages[1],
+        )
+
+    async def test_live_unavailable_rejects_person_without_location_grammar(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="there is no fresh version right now",
+            generated=(
+                "ohhh, you want a fresh one?\n"
+                "my friend just walked in so i can't take a fresh one rn... but open this"
+            ),
+            fallback_kind="live_unavailable",
+        )
+
+        visible = "\n".join(response.messages).lower()
+        self.assertNotIn("friend", visible)
+        self.assertIn("fresh", response.messages[1].lower())
+
+    async def test_non_live_fallback_rejects_context_claims_after_the_pivot(self):
+        cases = (
+            (
+                "live_unavailable",
+                "i don't have a fresh one rn but Tyler is here",
+                {"current_context": "there is no fresh one right now"},
+            ),
+            (
+                "semantic_near_match",
+                "not quite the angle but Tyler's right here",
+                {
+                    "current_context": "this is not quite the ass shot",
+                    "requested_detail": "ass",
+                },
+            ),
+            (
+                "type_swap",
+                "i don't have that as a photo but Tyler's showing you the video instead",
+                {
+                    "current_context": "she has it as a video rather than a photo",
+                    "media_type": "video",
+                    "description": "a private video from her bathroom",
+                    "requested_media_type": "photo",
+                },
+            ),
+        )
+        for fallback_kind, generated_second, kwargs in cases:
+            for suffix in (
+                "",
+                " but i'm at the gym now",
+                " but at the gym right now",
+                " but at the gym now",
+                " but at the gym today",
+                " but at the gym atm",
+            ):
+                with self.subTest(
+                    fallback_kind=fallback_kind,
+                    generated_second=generated_second,
+                    suffix=suffix,
+                ):
+                    response = await self._run_natural_fallback_copy(
+                        generated=f"you really went there?\n{generated_second}{suffix}",
+                        fallback_kind=fallback_kind,
+                        **kwargs,
+                    )
+                    visible = "\n".join(response.messages).lower()
+                    self.assertNotIn("tyler", visible)
+                    self.assertNotIn("gym", visible)
+
+    async def test_live_blocked_rejects_extra_context_after_the_pivot(self):
+        for suffix in (
+            " but Tyler is here too",
+            " but i'm at the gym now",
+            " but at the gym right now",
+            " but my sister is here too",
+            " but Taylor is beside me too",
+            " but Sarah is waiting here",
+        ):
+            with self.subTest(suffix=suffix):
+                response = await self._run_natural_fallback_copy(
+                    current_context="customers are around at the bar",
+                    generated=(
+                        "you want a fresh one?\n"
+                        "customers are everywhere at the bar so no fresh one"
+                        f"{suffix}"
+                    ),
+                    fallback_kind="live_blocked",
+                    live_capture_blocker="customers are around at the bar",
+                    live_capture_blocker_kind="work_crowd",
+                    current_locations=("bar", "stockroom"),
+                )
+                visible = "\n".join(response.messages).lower()
+                self.assertNotIn("tyler", visible)
+                self.assertNotIn("gym", visible)
+                self.assertNotIn("sister", visible)
+                self.assertNotIn("taylor", visible)
+                self.assertNotIn("sarah", visible)
+
+    async def test_live_blocked_rejects_location_first_current_scene(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="customers are around at the bar",
+            generated=(
+                "you want a fresh one?\n"
+                "customers are everywhere at the bar so no fresh one, "
+                "but at the gym right now"
+            ),
+            fallback_kind="live_blocked",
+            live_capture_blocker="customers are around at the bar",
+            live_capture_blocker_kind="work_crowd",
+            current_locations=("bar", "stockroom"),
+        )
+
+        self.assertNotIn("gym", "\n".join(response.messages).lower())
+
+    async def test_type_swap_replaces_reversed_photo_to_video_explanation(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="she has the requested detail as a video rather than a photo",
+            generated=(
+                "you really want to see that?\n"
+                "i don't have that as a video, but the photo is even better"
+            ),
+            media_type="video",
+            description="a private video from her bathroom",
+            fallback_kind="type_swap",
+            requested_media_type="photo",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        second = response.messages[1].lower()
+        self.assertRegex(
+            second,
+            r"(?:don't|do not)\s+have.{0,40}(?:photo|pic|picture).{0,80}(?:video|clip)",
+        )
+        self.assertNotRegex(
+            second,
+            r"(?:don't|do not)\s+have.{0,40}(?:video|clip).{0,80}(?:photo|pic|picture)",
+        )
+
+    async def test_type_swap_preserves_correct_photo_to_video_explanation(self):
+        natural = "i don't have that as a photo, but the video is even better"
+        response = await self._run_natural_fallback_copy(
+            current_context="she has the requested detail as a video rather than a photo",
+            generated=f"you really want to see that?\n{natural}",
+            media_type="video",
+            description="a private video from her bathroom",
+            fallback_kind="type_swap",
+            requested_media_type="photo",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        self.assertEqual(response.messages[1], natural)
+
+    async def test_type_swap_rejects_no_problem_as_false_negation(self):
+        for unsafe in (
+            "i have no problem giving you a photo, but the video is better",
+            "it's not true that i don't have a photo, but the video is better",
+            "not gonna lie the photo is hot, but the video is better",
+            "i never said i don't have a photo, but the video is better",
+            "i can't say i don't have a photo, but the video is better",
+            "i can't believe the photo looks this hot but the video is better",
+            "the photo isn't bad but the video is better",
+            "i don't think the photo is bad but the video is better",
+        ):
+            with self.subTest(unsafe=unsafe):
+                response = await self._run_natural_fallback_copy(
+                    current_context="she has the requested detail as a video rather than a photo",
+                    generated=f"you really want to see that?\n{unsafe}",
+                    media_type="video",
+                    description="a private video from her bathroom",
+                    fallback_kind="type_swap",
+                    requested_media_type="photo",
+                )
+
+                second = response.messages[1].lower()
+                self.assertNotEqual(second, unsafe)
+                self.assertRegex(
+                    second,
+                    r"(?:don't|do not)\s+have.{0,40}(?:photo|pic|picture)",
+                )
+
+    async def test_semantic_fallback_replaces_false_affirmative_detail_claim(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="this is not quite the ass shot he asked for",
+            generated=(
+                "straight to my ass? you're getting brave\n"
+                "this ass pic isn't quite the angle you asked for, but open it"
+            ),
+            fallback_kind="semantic_near_match",
+            requested_detail="ass",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        second = response.messages[1].lower()
+        self.assertNotIn("this ass pic", second)
+        self.assertRegex(second, r"not\s+quite.{0,30}ass\s+shot")
+
+    async def test_semantic_fallback_preserves_negative_missing_detail_copy(self):
+        natural = "not quite the ass shot you asked for... but open it"
+        response = await self._run_natural_fallback_copy(
+            current_context="this is not quite the ass shot he asked for",
+            generated=f"straight to my ass? you're getting brave\n{natural}",
+            fallback_kind="semantic_near_match",
+            requested_detail="ass",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        self.assertEqual(response.messages[1], natural)
+
+    async def test_semantic_fallback_rejects_detail_in_a_later_positive_clause(self):
+        for generated_second in (
+            "not quite the angle, but this one's all ass",
+            "not quite what you asked for but you can stare at my ass in this",
+            "not quite the angle and this one's all ass",
+            "not quite the angle — this one's all ass",
+            "not quite the angle: this one's all ass",
+            "not quite the angle because this one's all ass",
+            "no doubt this is the ass shot, but it's not quite what you asked for",
+            "not quite what you asked for, but this booty pic is dangerous",
+            "not only is this an ass pic, it's not quite what you asked for",
+            "not gonna lie this ass pic is better instead",
+            "i can't deny this ass pic is hot instead",
+        ):
+            with self.subTest(generated_second=generated_second):
+                response = await self._run_natural_fallback_copy(
+                    current_context="this is not quite the ass shot he asked for",
+                    generated=f"you really went there?\n{generated_second}",
+                    fallback_kind="semantic_near_match",
+                    requested_detail="ass",
+                )
+
+                second = response.messages[1].lower()
+                self.assertNotIn("all ass", second)
+                self.assertNotIn("stare at my ass", second)
+                self.assertNotIn("booty pic", second)
+                self.assertNotIn("no doubt", second)
+                self.assertRegex(second, r"not\s+quite.{0,30}ass\s+shot")
+
+    def test_saved_offer_copy_rejects_current_capture_excuses(self):
+        for text in (
+            "Tyler just walked in but open this",
+            "there are customers all around me but open this",
+            "i'm at the gym so i can't take a fresh one, but open this",
+            "i'm behind the bar rn, open this",
+            "at the bar rn, open this",
+            "at the gym right now, open this",
+            "the bar is packed right now, open this",
+            "my sister dared me to send this",
+            "Taylor dared me to send this",
+            "Sarah's sitting next to me, so open this quietly",
+            "i'm stuck in the office, but open this",
+            "i'm in Paris right now, open this",
+            "i'm backstage right now, open this",
+            "i'm at Nikkk's place rn, open this",
+            "i just snapped this five seconds ago... open it",
+            "i took this for you just now",
+            "i shot this especially for you a few seconds ago",
+            "i recorded this just for you right now",
+            "i made this for you rn",
+            "i captured this for you just now... open it",
+            "i took this a minute ago",
+            "i snapped this a second ago",
+            "this one's fresh, open it",
+            "i snapped this moments ago",
+            "this is brand new, open it",
+            "just finished filming this for you",
+            "at the bar now, open this",
+            "at the gym today, open this",
+            "at the club tonight, open this",
+            "sitting at the bar, open this",
+            "hiding in the stockroom, open this",
+            "waiting at the gym, open this",
+            "chilling at the club, open this",
+            "getting ready in my bathroom but open this",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(self.engine._saved_offer_copy_is_safe(text))
+
+        self.assertTrue(
+            self.engine._saved_offer_copy_is_safe(
+                "god... open this before i change my mind"
+            )
+        )
+        for text in (
+            "here's one from my bed",
+            "here's something i took in my bathroom",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(self.engine._saved_offer_copy_is_safe(text))
+
+    def test_fallback_teaser_rejects_unknown_people_and_places(self):
+        for text in (
+            "i'm in the office with my sister... you really want one?",
+            "my sister is here and you're asking me for that?",
+            "i'm stuck in the office... bold request",
+            "Taylor is beside me... bold request",
+            "Sarah is waiting here... bold request",
+            "Nikkk is right here... bold request",
+            "i'm backstage right now... bold request",
+            "sitting at the bar... bold request",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(self.engine._fallback_teaser_is_safe(text))
+
+    async def test_fallback_copy_rejects_fresh_capture_claims(self):
+        cases = (
+            (
+                "semantic_near_match",
+                "not quite the ass shot but i just took this instead",
+                {"requested_detail": "ass"},
+            ),
+            (
+                "semantic_near_match",
+                "not quite the ass shot but i took this a minute ago instead",
+                {"requested_detail": "ass"},
+            ),
+            (
+                "semantic_near_match",
+                "not quite the ass shot but this one's fresh instead",
+                {"requested_detail": "ass"},
+            ),
+            (
+                "type_swap",
+                "i don't have it as a photo but i just filmed this video instead",
+                {
+                    "media_type": "video",
+                    "requested_media_type": "photo",
+                },
+            ),
+            (
+                "live_blocked",
+                "customers are around at the bar so no fresh one but i just took this",
+                {
+                    "live_capture_blocker": "customers are around at the bar",
+                    "live_capture_blocker_kind": "work_crowd",
+                    "current_locations": ("bar",),
+                },
+            ),
+        )
+        for fallback_kind, unsafe, kwargs in cases:
+            with self.subTest(fallback_kind=fallback_kind):
+                response = await self._run_natural_fallback_copy(
+                    current_context="this requested version is unavailable",
+                    generated=f"you really went there?\n{unsafe}",
+                    fallback_kind=fallback_kind,
+                    **kwargs,
+                )
+                second = response.messages[1].lower()
+                self.assertNotEqual(second, unsafe.lower())
+                self.assertNotRegex(
+                    second,
+                    r"\b(?:just|a\s+(?:second|minute)\s+ago|brand[- ]new|"
+                    r"this\s+one(?:'|\u2019)s\s+fresh)\b",
+                )
+
+    async def test_semantic_fallback_rejects_current_activity_excuse(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="this is not quite the ass shot he asked for",
+            generated=(
+                "you really went there?\n"
+                "not quite the ass shot but sitting at the bar so open this"
+            ),
+            fallback_kind="semantic_near_match",
+            requested_detail="ass",
+        )
+
+        self.assertNotIn("bar", response.messages[1].lower())
+
+    async def test_inventory_synonyms_are_replaced_in_fallback_copy(self):
+        for generated_second in (
+            "not quite the angle you asked for; this is the top result in my inventory",
+            "not quite the angle you asked for; this was the first search result",
+        ):
+            with self.subTest(generated_second=generated_second):
+                response = await self._run_natural_fallback_copy(
+                    current_context="this is not quite the ass shot he asked for",
+                    generated=f"you really went there?\n{generated_second}",
+                    fallback_kind="semantic_near_match",
+                    requested_detail="ass",
+                )
+                second = response.messages[1].lower()
+                self.assertNotIn("inventory", second)
+                self.assertNotIn("search result", second)
+                self.assertNotIn("top result", second)
+
+    async def test_legacy_type_swap_infers_video_when_selected_item_is_photo(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="this photo is the available type alternative",
+            generated=(
+                "you really want to see that?\n"
+                "i picked the selected alternative for you"
+            ),
+            media_type="photo",
+            description="a private photo from her bedroom",
+            fallback_kind="type_swap",
+            requested_media_type="",
+        )
+
+        self.assertEqual(len(response.messages), 2)
+        second = response.messages[1].lower()
+        self.assertRegex(
+            second,
+            r"(?:don't|do not)\s+have.{0,40}(?:video|clip).{0,80}(?:photo|pic|picture)",
+        )
+        self.assertNotRegex(
+            second,
+            r"(?:don't|do not)\s+have.{0,40}(?:photo|pic|picture).{0,80}(?:photo|pic|picture)",
+        )
 
     async def test_permission_reask_is_committed_only_after_question_is_persisted(self):
         async def plan_reask(user_id, text, *, batch_number, heat, period):
@@ -791,7 +1610,7 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         replacement = next(event for event in self.events if event[0] == "replace")
         self.assertEqual("\n".join(response.messages), replacement[2])
 
-    async def test_failed_generation_cancels_reservation_and_returns_no_card(self):
+    async def test_failed_generation_uses_trusted_copy_and_finalizes_card(self):
         with ExitStack() as stack:
             for turn_patch in self._patch_turn_dependencies(generated=""):
                 stack.enter_context(turn_patch)
@@ -799,10 +1618,14 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 23, "show me a sexy photo"
             )
 
-        self.assertIn(("cancel", "41"), self.events)
-        self.assertFalse(any(event[0] == "finalize" for event in self.events))
-        self.assertIsNone(response.media_offer)
-        self.assertIsNone(response.commerce_action)
+        self.assertNotIn(("cancel", "41"), self.events)
+        self.assertIn(("finalize", "41"), self.events)
+        self.assertEqual(response.commerce_action, "offer_current")
+        self.assertEqual(response.media_offer["offer_id"], 41)
+        self.assertNotIn("full_key", response.media_offer)
+        self.assertNotIn("access_url", response.media_offer)
+        self.assertEqual(len(response.messages), 1)
+        self.assertTrue(response.messages[0].strip())
 
     async def test_failed_teaser_persistence_cancels_reservation(self):
         patches = list(self._patch_turn_dependencies())

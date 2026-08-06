@@ -175,6 +175,12 @@ _COMMERCE_OFFER_TRIGGERS = frozenset(
 _IMMEDIATE_OFFER_TRIGGERS = frozenset(
     {"direct", "permission_reask"}
 )
+_COMMERCE_FALLBACK_KINDS = frozenset(
+    {"live_blocked", "live_unavailable", "type_swap", "semantic_near_match"}
+)
+_LIVE_BLOCKER_KINDS = frozenset(
+    {"tyler", "work_crowd", "gym_crowd", "social_crowd", "shopping_crowd"}
+)
 
 _URL_OR_STORAGE_REFERENCE = re.compile(
     r"(?:https?://|s3://|r2://|file:(?://)?|[a-z]:[\\/]|"
@@ -250,6 +256,34 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
     current_context = _safe_commerce_copy(
         _commerce_value(brief, "current_context", "")
     )
+    fallback_kind_value = _commerce_value(brief, "fallback_kind", "")
+    fallback_kind_value = getattr(fallback_kind_value, "value", fallback_kind_value)
+    fallback_kind = str(fallback_kind_value)
+    if fallback_kind not in _COMMERCE_FALLBACK_KINDS:
+        fallback_kind = ""
+    requested_detail = _safe_commerce_copy(
+        _commerce_value(brief, "requested_detail", ""),
+        limit=120,
+    )
+    requested_media_type = str(
+        _commerce_value(brief, "requested_media_type", "") or ""
+    )
+    if requested_media_type not in {"photo", "video"}:
+        requested_media_type = ""
+    live_capture_blocker = _safe_commerce_copy(
+        _commerce_value(brief, "live_capture_blocker", ""),
+        limit=240,
+    )
+    live_blocker_kind_value = _commerce_value(
+        brief,
+        "live_capture_blocker_kind",
+        "",
+    )
+    live_blocker_kind = str(
+        getattr(live_blocker_kind_value, "value", live_blocker_kind_value)
+    )
+    if live_blocker_kind not in _LIVE_BLOCKER_KINDS:
+        live_blocker_kind = ""
 
     offer_trigger = _commerce_offer_trigger(brief)
     immediate_offer = offer_trigger in _IMMEDIATE_OFFER_TRIGGERS
@@ -285,18 +319,22 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
             "A real locked saved media card WILL be attached immediately after this text. "
             "This exactly matches what he asked to see, but it is a saved item rather than "
             "a fresh capture. Write exactly ONE short text bubble: react with genuine "
-            "temptation, then introduce it confidently as something you kept for a special "
-            "moment. Do not give an excuse, discuss your current surroundings, imply a live "
-            "mismatch, or pretend you captured it right now. The card arrives with this "
-            "reply, so do not ask for permission or imply it will arrive later. Do not say "
-            "it is already unlocked or paid for."
+            "temptation and present it confidently as something worth opening. Saved media "
+            "is a feature, not an apology or a compromise. You do not need to mention that "
+            "it was saved, its location, or a special occasion. Do not echo the catalog-like "
+            "description as a label. Vary the tease naturally; avoid stock phrases such as "
+            "'kept this for a special moment'. Do not give an excuse, discuss your current "
+            "surroundings, imply a live mismatch, or pretend you captured it right now. The "
+            "card arrives with this reply, so do not ask for permission or imply it will "
+            "arrive later. Do not say it is already unlocked or paid for."
         )
         if immediate_offer
         else (
             "A real locked saved media card WILL be attached to this reply. Introduce it "
-            "confidently in exactly ONE short text bubble as something you kept for a special "
-            "moment. Do not give a current-capture excuse, discuss a mismatch, or pretend it "
-            "was captured right now. Do not say it is already unlocked or paid for."
+            "confidently in exactly ONE short, varied text bubble. Saved media is desirable, "
+            "not a compromise. Do not force a special-occasion phrase, echo the description "
+            "as a catalog label, give a current-capture excuse, discuss a mismatch, or "
+            "pretend it was captured right now. Do not say it is already unlocked or paid for."
         )
     )
     offer_fallback_instructions = (
@@ -307,20 +345,31 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
             "surprise and visible temptation and uses one brief rhetorical tease in the "
             "spirit of 'ohhh, you really wanna cross that line?' The tease is flavor, NOT a "
             "confirmation step: do not ask for permission and do not wait for another answer. "
-            "Bubble 2 states the precise mismatch reason from current_context, then pivots "
-            "to and introduces the exact selected alternative in offered_item_description. "
-            "The reason may be a live-capture blocker, a requested media-type mismatch, or a "
-            "semantic mismatch. Use only the supplied reason: never invent Tyler, a friend, "
-            "customers, coworkers, or any other person. Do not pretend the alternative was "
-            "captured right now, and do not imply the card will arrive later."
+            "Bubble 2 acknowledges only the one human-relevant mismatch described by the "
+            "structured fallback facts, then confidently pivots to the real card. Treat "
+            "current_context as a factual constraint, NOT a line to quote. Paraphrase it in "
+            "your normal texting voice. Use everyday words such as angle, shot, pic, clip, "
+            "fresh one, or this one. Never say variation, semantic match, closest available "
+            "match, selected alternative, available type alternative, inventory, catalog, "
+            "search result, top result, or content item. Do not recite "
+            "offered_item_description as a product label. Use it only to stay truthful; "
+            "normally call the card 'this' or 'this one'. Do not repeat its private/nude "
+            "label or origin location. You may name photo versus video only when that type "
+            "difference is the actual fallback. Use "
+            "only the supplied reason: never invent Tyler, a friend, customers, coworkers, "
+            "or any other person. Do not pretend the card was captured right now, and do not "
+            "imply it will arrive later."
         )
         if immediate_offer
         else (
             "A real locked alternative media card WILL be attached. Write exactly TWO short "
-            "text bubbles. In bubble 2, state the precise mismatch reason from current_context "
-            "and pivot naturally to the selected alternative. Use only that supplied reason; "
-            "never invent a person or a generic current-capture excuse. Do not pretend the "
-            "alternative was captured right now."
+            "text bubbles. In bubble 2, paraphrase the one structured fallback reason in "
+            "ordinary human language and pivot confidently to the card. The structured fields "
+            "are facts, not dialogue. Never use inventory/search terminology, invent a person, "
+            "repeat the item's private/nude label or origin location, or add a generic "
+            "current-capture excuse. Refer to the card as 'this' or 'this one' unless the "
+            "photo/video difference is the fallback. Do not pretend the card was captured "
+            "right now."
         )
     )
 
@@ -357,6 +406,18 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
         }
         if action == "offer_fallback" and current_context:
             payload["current_context"] = current_context
+        if action == "offer_fallback" and fallback_kind:
+            payload["fallback_kind"] = fallback_kind
+        if action == "offer_fallback" and requested_detail:
+            payload["requested_detail"] = requested_detail
+        if action == "offer_fallback" and requested_media_type:
+            payload["requested_media_type"] = requested_media_type
+        if action == "offer_fallback" and live_capture_blocker:
+            payload["live_capture_blocker"] = _spoken_commerce_context(
+                live_capture_blocker
+            )
+        if action == "offer_fallback" and live_blocker_kind:
+            payload["live_capture_blocker_kind"] = live_blocker_kind
     else:
         # Legacy mapping callers and non-offer actions still use the single
         # bounded brief field. Production offers use the separated structure
@@ -369,8 +430,10 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
         f"ACTION_DATA_JSON: {json.dumps(payload, ensure_ascii=False)}\n"
         f"REPLY BEHAVIOR: {instructions}\n"
         "For an offer, offered_item_description is the authoritative first-person factual "
-        "metadata for the one real item; current_context contains only the precise reason "
-        "for a fallback and never describes the file's origin. Describe your own item only "
+        "metadata for the one real item; it is a factual boundary, not wording to repeat. "
+        "current_context contains only the reason for a fallback and never describes the "
+        "file's origin; the other fallback fields are equally presentation-only. Paraphrase "
+        "them naturally rather than quoting their phrasing. Describe your own item only "
         "with I/me/my; never call yourself Mia or use she/her. Preserve the item's media "
         "type, explicitness, "
         "capture timing, and setting. Never substitute a different room or location; if "

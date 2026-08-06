@@ -75,6 +75,13 @@ class CommerceDecision:
     offer: MediaOffer | None = None
     current_context: str = ""
     offered_item_description: str = ""
+    # Structured presentation facts. They are prompt-only and never leave the
+    # backend in the public ``media_offer`` payload.
+    fallback_kind: str = ""
+    requested_detail: str = ""
+    requested_media_type: str = ""
+    live_capture_blocker: str = ""
+    live_capture_blocker_kind: str = ""
     # Internal state needed to commit a non-offer action only after its visible
     # assistant response has been persisted. Prompt serialization is allowlist-
     # based and never includes these fields.
@@ -226,20 +233,21 @@ class MediaCommerceService:
             )
         elif planned.action == CommerceAction.OFFER_SAVED.value:
             brief = (
-                f"Offer this real saved {planned.item.media_type} as something I kept "
-                f"for a special moment: {spoken_item_description}. Do not give a current-"
-                "capture excuse."
+                f"Offer this real saved {planned.item.media_type} confidently: "
+                f"{spoken_item_description}. Treat saved media as desirable, not as a "
+                "compromise, and do not give a current-capture excuse."
             )
         else:
             reason = _spoken_fallback_context(
                 planned.fallback_reason
-                or "The exact requested match is unavailable."
+                or "This is not quite the shot he asked for."
             )
             current_context = reason
             brief = (
-                f"Fallback reason: {reason}. Offer this real backend-selected alternative "
-                f"{planned.item.media_type}: {spoken_item_description}. State only that "
-                "precise mismatch reason and do not invent an excuse."
+                f"Offer this real {planned.item.media_type}: "
+                f"{spoken_item_description}. The structured fallback facts describe the "
+                "single mismatch to acknowledge naturally; they are constraints, not "
+                "dialogue to quote. Do not invent an excuse."
             )
         offer = MediaOffer(
             offer_id=record.offer_id,
@@ -260,6 +268,13 @@ class MediaCommerceService:
             offer=offer,
             current_context=current_context,
             offered_item_description=spoken_item_description,
+            fallback_kind=planned.fallback_kind or "",
+            requested_detail=planned.requested_detail or "",
+            requested_media_type=planned.requested_media_type or "",
+            live_capture_blocker=_spoken_fallback_context(
+                planned.live_capture_blocker or ""
+            ),
+            live_capture_blocker_kind=planned.live_capture_blocker_kind or "",
             user_id=user_id,
             batch_number=batch_number,
             item_locations=tuple(planned.item.tags.get("location", ())),
