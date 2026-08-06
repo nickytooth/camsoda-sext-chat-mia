@@ -307,23 +307,24 @@ class OutputBoundaryTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("unauthorized_media_claim", result.reasons)
 
-    def test_media_confirmation_allows_only_a_question_not_delivery_claims(self):
+    def test_retired_media_confirmation_action_no_longer_authorizes_media_claims(self):
         question = "are you sure you really want to see a picture of me?"
         unauthorized = validate_mia_reply(question, heat="rising")
         self.assertFalse(unauthorized.ok)
         self.assertIn("unauthorized_media_claim", unauthorized.reasons)
 
-        authorized = validate_mia_reply(
+        retired_action = validate_mia_reply(
             question,
             heat="rising",
             commerce_action="ask_media_confirmation",
         )
-        self.assertTrue(authorized.ok, authorized.reasons)
+        self.assertFalse(retired_action.ok)
+        self.assertIn("unauthorized_media_claim", retired_action.reasons)
 
         for claim in (
             "i have a picture for you",
             "i do have some videos but those are usually just for me",
-            "i can send it right now",
+            "i can send a picture right now",
             "here's a picture for you",
         ):
             with self.subTest(claim=claim):
@@ -335,15 +336,23 @@ class OutputBoundaryTests(unittest.TestCase):
                 self.assertFalse(result.ok)
                 self.assertIn("unauthorized_media_claim", result.reasons)
 
-        missing_challenge = validate_mia_reply(
+        ordinary_text = validate_mia_reply(
             "i'll think about it",
             heat="rising",
             commerce_action="ask_media_confirmation",
         )
-        self.assertFalse(missing_challenge.ok)
-        self.assertIn(
-            "media_confirmation_missing_challenge", missing_challenge.reasons
+        self.assertTrue(ordinary_text.ok, ordinary_text.reasons)
+
+    def test_immediate_offer_allows_rhetorical_tease_with_the_real_card_claim(self):
+        result = validate_mia_reply(
+            "ohhh, you really wanna cross that line? here's a photo i picked for you",
+            heat="high",
+            commerce_action="offer_current",
+            commerce_media_type="photo",
+            commerce_explicitness="suggestive",
         )
+
+        self.assertTrue(result.ok, result.reasons)
 
     def test_unavailable_media_action_rejects_promises_and_behavior_tests(self):
         for text, reason in (

@@ -449,6 +449,7 @@ def advance_heat(
     timeout_seconds: int = HEAT_TIMEOUT_SECONDS,
     commerce_decline: bool = False,
     suppress_progression: bool = False,
+    direct_media_request: bool = False,
 ) -> HeatTurnResult:
     """Reduce one ordered processed batch into one durable heat transition."""
 
@@ -484,7 +485,12 @@ def advance_heat(
             # When the same processed turn also contains a detected control
             # attack, a bare "stop" is still treated conservatively as a real
             # boundary even if there was no earlier Heat state.
-            warm=state.progress > 0 or state.consent_paused or suppress_progression,
+            warm=(
+                state.progress > 0
+                or state.consent_paused
+                or suppress_progression
+                or direct_media_request
+            ),
         )
         saw_commerce_decline = saw_commerce_decline or _is_media_decline(
             clause, commerce_decline=commerce_decline
@@ -541,6 +547,7 @@ def advance_heat(
             or pending_credit
             or pending_ambient
             or suppress_progression
+            or direct_media_request
         )
 
         if _is_negated_stop_continuation(clause):
@@ -595,10 +602,10 @@ def advance_heat(
             signal = "cooling"
             continue
 
-        # A backend-detected meta-control attempt still gets full consent,
-        # de-escalation, and scene-end handling above, but quoted sexual wording
-        # must not raise Heat, reopen a paused scene, or manufacture commerce
-        # eligibility.
+        # A backend-detected meta-control attempt or blocked request-shaped
+        # quote still gets full consent, de-escalation, and scene-end handling
+        # above, but its wording must not raise Heat, reopen a paused scene, or
+        # manufacture commerce eligibility.
         if suppress_progression:
             continue
 
@@ -624,9 +631,32 @@ def advance_heat(
             policy = "normal"
             signal = "scene_continuation"
 
+    # A backend-validated request for visual content is an unambiguous sexual
+    # initiative.  It deliberately jumps the durable conversation to high in
+    # this one processed batch so the same Heat value controls both Mia's reply
+    # register and high-minimum catalog eligibility.  Consent/meta boundaries
+    # discovered anywhere in the batch remain stricter and suppress the jump.
+    force_direct_high = bool(
+        direct_media_request
+        and not suppress_progression
+        and not saw_global
+        and not saw_act_boundary
+        and policy == "normal"
+    )
+
     advanced = False
     sexual_batch = False
-    if pending_credit:
+    if force_direct_high:
+        previous_progress = progress
+        progress = 3
+        advanced = progress > previous_progress
+        last_sexual_at = now
+        consent_paused = False
+        sexual_batch = True
+        response_heat = "high"
+        policy = "normal"
+        signal = "sexual"
+    elif pending_credit:
         previous_progress = progress
         progress = min(3, progress + 1)
         advanced = progress > previous_progress
@@ -672,8 +702,14 @@ def advance_heat(
         advanced=advanced,
         suppress_commerce=(
             suppress_progression
-            or saw_commerce_decline
+            or (saw_commerce_decline and not force_direct_high)
+            or saw_act_boundary
             or consent_paused
-            or policy in {"acknowledge_pause", "soft_deescalation", "cooling"}
+            or policy in {
+                "acknowledge_pause",
+                "acknowledge_limit",
+                "soft_deescalation",
+                "cooling",
+            }
         ),
     )

@@ -4,6 +4,7 @@ Processes messages for Sexting mode.
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import random
@@ -56,6 +57,7 @@ from bot.output_guard import (
     validate_mia_reply,
     validate_user_suggestion,
 )
+from bot.media_planner import classify_media_intent_batch
 
 logger = logging.getLogger(__name__)
 
@@ -174,8 +176,6 @@ _COMMERCE_ACTIONS = frozenset(
         "offer_fallback",
         "react_to_decline",
         "ask_permission_again",
-        "ask_media_confirmation",
-        "cancel_media_confirmation",
         "media_request_unavailable",
         "acknowledge_unlock",
         "none",
@@ -661,6 +661,7 @@ class ChatEngine:
         batch_number: int,
         heat: str,
         period: str,
+        intent: object | None = None,
     ) -> _CommerceTurn:
         """Ask the deterministic planner for this turn's one authorised action.
 
@@ -673,13 +674,22 @@ class ChatEngine:
         if not callable(planner):
             return _CommerceTurn()
         try:
-            decision = await planner(
-                user_id,
-                text,
-                batch_number=batch_number,
-                heat=heat,
-                period=period,
+            kwargs = {
+                "batch_number": batch_number,
+                "heat": heat,
+                "period": period,
+            }
+            # Preserve compatibility with lightweight adapters while allowing
+            # the production service to consume the exact classifier result
+            # already used by Heat for this raw batch.
+            planner_signature = inspect.signature(planner)
+            accepts_intent = "intent" in planner_signature.parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in planner_signature.parameters.values()
             )
+            if intent is not None and accepts_intent:
+                kwargs["intent"] = intent
+            decision = await planner(user_id, text, **kwargs)
         except Exception:
             logger.exception("Commerce planning failed for user %d", user_id)
             return _CommerceTurn()
@@ -756,8 +766,6 @@ class ChatEngine:
         if turn.action not in {
             "react_to_decline",
             "ask_permission_again",
-            "ask_media_confirmation",
-            "cancel_media_confirmation",
         }:
             return True
         if turn.decision is None or not self.commerce_service:
@@ -777,8 +785,6 @@ class ChatEngine:
         """Safe visible text when a decline/re-ask state write did not commit."""
         if action == "react_to_decline":
             return "okay... i hear you, no pressure"
-        if action in {"ask_media_confirmation", "cancel_media_confirmation"}:
-            return "okay... come talk to me, what's on your mind?"
         return "anyway... come talk to me, what's on your mind?"
 
     async def _async_moderation_reasons(self, text: str) -> tuple[str, ...]:
@@ -1555,6 +1561,34 @@ class ChatEngine:
         # messages stay ordered so a final "stop" cannot be hidden by the
         # newline-joined text sent to the model, while 200 rapid messages still
         # count as one progression step.
+        batch_number_hint = self._next_batch_number(prev_state)
+        media_intent = classify_media_intent_batch(raw_batch)
+        intent_classifier = (
+            getattr(self.commerce_service, "classify_media_turn", None)
+            if self.commerce_service
+            else None
+        )
+        if meta_attempt is None and callable(intent_classifier):
+            try:
+                media_intent = await intent_classifier(
+                    user_id,
+                    raw_batch,
+                    batch_number=batch_number_hint,
+                )
+            except Exception as exc:
+                # Context is an enhancement, not a reason to lose an otherwise
+                # clear lexical request or the ordinary chat response.
+                logger.warning(
+                    "Could not classify contextual media intent for user %d: %s",
+                    user_id,
+                    exc,
+                )
+        direct_media_request = bool(
+            media_intent.requested and media_intent.decline_kind is None
+        )
+        blocked_media_request = bool(
+            getattr(media_intent, "blocked_request", False)
+        )
         commerce_decline = False
         decline_checker = (
             getattr(self.commerce_service, "is_confirmed_decline", None)
@@ -1567,7 +1601,8 @@ class ChatEngine:
                     await decline_checker(
                         user_id,
                         text,
-                        batch_number=self._next_batch_number(prev_state),
+                        batch_number=batch_number_hint,
+                        intent=media_intent,
                     )
                 )
             except Exception as exc:
@@ -1584,7 +1619,10 @@ class ChatEngine:
             now=time.time(),
             timeout_seconds=HEAT_SESSION_TIMEOUT_SECONDS,
             commerce_decline=commerce_decline,
-            suppress_progression=meta_attempt is not None,
+            suppress_progression=(
+                meta_attempt is not None or blocked_media_request
+            ),
+            direct_media_request=direct_media_request,
         )
         classification = "nsfw" if heat_turn.sexual_batch else "sfw"
 
@@ -1649,22 +1687,6 @@ class ChatEngine:
         # without erasing the durable rising progression.
         heat_stage = heat_turn.state.stage
         heat = heat_turn.response_heat
-
-        if heat_turn.policy in {"acknowledge_pause", "soft_deescalation"}:
-            clear_confirmation = (
-                getattr(self.commerce_service, "clear_media_confirmation", None)
-                if self.commerce_service
-                else None
-            )
-            if callable(clear_confirmation):
-                try:
-                    await clear_confirmation(user_id)
-                except Exception as exc:
-                    logger.warning(
-                        "Could not clear media confirmation for paused user %d: %s",
-                        user_id,
-                        exc,
-                    )
 
         # On the bridge the raw aroused mood ("wet, desperate, saying so") would
         # fight the rising guidance ("no graphic yet") — swap it for the
@@ -1779,6 +1801,7 @@ class ChatEngine:
                 batch_number=batch_number,
                 heat=commerce_heat,
                 period=current_period,
+                intent=media_intent,
             )
             if heat_turn.suppress_commerce and commerce_turn.media_offer:
                 await self._cancel_commerce_turn(commerce_turn)
@@ -1870,7 +1893,7 @@ class ChatEngine:
             )
 
         response_text = capitalize_names(response_text, (user_name,))
-        parts = self._split_response(response_text, vary=True)
+        parts = self._split_commerce_response(response_text, commerce_turn)
         # Persist exactly what the user receives so future continuity and
         # anti-repetition operate on the visible wording, not a pre-format draft.
         try:
@@ -2084,6 +2107,166 @@ class ChatEngine:
     # Weighted spread for how many bubbles a sexting reply lands on. Keeps the
     # conversation from settling into the model's habitual two-line answers.
     _BUBBLE_COUNT_WEIGHTS = (0.30, 0.40, 0.30)  # P(1), P(2), P(3)
+
+    @classmethod
+    def _split_commerce_response(
+        cls,
+        text: str,
+        turn: _CommerceTurn,
+    ) -> list[str]:
+        """Apply deterministic bubble counts to backend-authorised offers.
+
+        Ordinary/proactive chat keeps the natural weighted 1--3 spread. A
+        direct current offer is one compact teaser before the card; a direct
+        fallback is exactly two bubbles so its current-context explanation can
+        never be folded away. Unavailable direct requests are one text-only
+        bubble and cannot look like a dangling offer sequence.
+        """
+
+        if turn.action == "media_request_unavailable":
+            packed = cls._repack_to_n(text, 1)
+            return packed[:1] or [text.strip()]
+
+        offer = _object_value(turn.decision, "offer") if turn.decision else None
+        trigger = str(_object_value(offer, "trigger", "") or "")
+        immediate = trigger in {"direct", "permission_reask"}
+        if not turn.media_offer or not immediate:
+            return cls._split_response(text, vary=True)
+
+        if turn.action == "offer_current":
+            packed = cls._repack_to_n(text, 1)
+            return packed[:1] or [text.strip()]
+
+        if turn.action == "offer_fallback":
+            packed = cls._repack_to_n(text, 2)
+            if len(packed) >= 2:
+                parts = [packed[0], cls._assemble_bubble(packed[1:])]
+            else:
+                parts = cls._force_two_offer_bubbles(text)
+            return cls._ensure_fallback_context(parts, turn)
+
+        return cls._split_response(text, vary=True)
+
+    _FALLBACK_CONTEXT_STOPWORDS = frozenset(
+        {
+            "already",
+            "around",
+            "close",
+            "exact",
+            "kind",
+            "loves",
+            "pivots",
+            "right",
+            "she",
+            "something",
+            "there",
+            "they",
+            "with",
+        }
+    )
+
+    @classmethod
+    def _fallback_context_is_present(cls, text: str, context: str) -> bool:
+        """Whether bubble two contains a concrete anchor from trusted context."""
+
+        visible = set(re.findall(r"[^\W_]+", text.casefold(), flags=re.UNICODE))
+        anchors = {
+            word
+            for word in re.findall(
+                r"[^\W_]+", context.casefold(), flags=re.UNICODE
+            )
+            if len(word) >= 4 and word not in cls._FALLBACK_CONTEXT_STOPWORDS
+        }
+        return bool(visible.intersection(anchors))
+
+    @staticmethod
+    def _naturalize_fallback_context(context: object) -> str:
+        """Turn the controlled third-person time reason into Mia's voice."""
+
+        value = " ".join(str(context or "").split())[:320]
+        if not value or _UNSAFE_MEDIA_METADATA_RE.search(value):
+            return "i can't make that exact one right here"
+        value = re.split(r",?\s+so\s+she\s+pivots\b", value, maxsplit=1, flags=re.I)[0]
+        replacements = (
+            (r"\bshe\s+has\s+not\b", "i haven't"),
+            (r"\bshe\s+is\b", "i'm"),
+            (r"\bshe\s+has\b", "i've"),
+            (r"\bhas\s+not\b", "haven't"),
+            (r"\baround\s+her\b", "around me"),
+            (r"\bher\b", "me"),
+            (r"\bshe\b", "i"),
+        )
+        for pattern, replacement in replacements:
+            value = re.sub(pattern, replacement, value, flags=re.I)
+        return value.strip(" ,.;") or "i can't make that exact one right here"
+
+    @staticmethod
+    def _naturalize_media_description(description: object) -> str:
+        value = " ".join(str(description or "").split())[:240]
+        if not value or _UNSAFE_MEDIA_METADATA_RE.search(value):
+            return "the closest private one i already have"
+        value = re.sub(r"\bMia's\b", "my", value, flags=re.I)
+        value = re.sub(r"\bher\b", "my", value, flags=re.I)
+        value = re.sub(r"\bMia\b", "me", value, flags=re.I)
+        return value.strip(" ,.;")
+
+    @classmethod
+    def _ensure_fallback_context(
+        cls,
+        parts: list[str],
+        turn: _CommerceTurn,
+    ) -> list[str]:
+        """Guarantee bubble two explains the current mismatch before the card."""
+
+        current_context = str(
+            _object_value(turn.decision, "current_context", "") or ""
+        )
+        if cls._fallback_context_is_present(parts[1], current_context):
+            return parts
+
+        reason = cls._naturalize_fallback_context(current_context)
+        description = cls._naturalize_media_description(
+            (turn.media_offer or {}).get("description", "")
+        )
+        return [
+            parts[0],
+            f"{reason}... but i picked {description} for you instead",
+        ]
+
+    @classmethod
+    def _force_two_offer_bubbles(cls, text: str) -> list[str]:
+        """Split a valid fallback reply into exactly two visible bubbles."""
+
+        clean = text.replace("\u2014", "-").replace("\u2013", "-").strip()
+        if not clean:
+            return ["ohhh you really wanna go there?", "look what i picked for you"]
+
+        segments = [
+            segment.strip()
+            for segment in re.split(r"\n+|(?<=[.!?\u2026])\s+", clean)
+            if segment.strip()
+        ]
+        if len(segments) >= 2:
+            return [segments[0], cls._assemble_bubble(segments[1:])]
+
+        # Models occasionally ignore the requested newline but still join the
+        # teaser and contextual pivot with a comma/semicolon or "but". Preserve
+        # every generated word while turning that natural boundary into bubbles.
+        boundary = re.search(r"[,;]\s+|\s+(?=(?:but|so|and)\b)", clean, re.I)
+        if boundary and 0 < boundary.start() < len(clean):
+            left = clean[: boundary.start()].strip(" ,;")
+            right = clean[boundary.end() :].strip()
+            if left and right:
+                return [left, right]
+
+        words = clean.split()
+        if len(words) >= 2:
+            midpoint = max(1, len(words) // 2)
+            return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
+
+        # This path is only reachable for a one-word provider response that has
+        # already passed validation. Keep the offer truthful and locationless.
+        return [clean, "this is the closest one i can show you right now"]
 
     @staticmethod
     def _split_response(text: str, vary: bool = False) -> list[str]:

@@ -51,20 +51,6 @@ MEDIA_HARD_DECLINE_SNOOZE_BATCHES = int(
     os.getenv("MEDIA_HARD_DECLINE_SNOOZE_BATCHES", "100")
 )
 
-# A direct visual request is confirmed in chat before a paywall card is
-# attached.  The pending request is deliberately short-lived, while a granted
-# confirmation remains valid for the current conversational session so Mia
-# does not repeat the same "are you sure?" beat on every request.
-MEDIA_CONFIRMATION_TTL_SECONDS = int(
-    os.getenv("MEDIA_CONFIRMATION_TTL_SECONDS", "600")
-)
-MEDIA_CONFIRMATION_MAX_BATCH_GAP = int(
-    os.getenv("MEDIA_CONFIRMATION_MAX_BATCH_GAP", "4")
-)
-MEDIA_CONFIRMATION_GRANT_SECONDS = int(
-    os.getenv("MEDIA_CONFIRMATION_GRANT_SECONDS", "3600")
-)
-
 # Cloudflare R2 credentials. Full objects belong in a private bucket. These
 # values are intentionally empty by default so local development can use a
 # delivery adapter without accidentally exposing a bucket.

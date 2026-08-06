@@ -142,6 +142,28 @@ class AtomicHeatPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state.last_batch, 6)
         self.assertEqual(store.rows[88]["total_messages"], 6)
 
+    async def test_validated_media_request_is_persisted_as_high_in_one_batch(self):
+        store = _SharedEngagementStore()
+
+        async def get_connection():
+            return store.connection()
+
+        with patch(
+            "bot.engagement.get_connection",
+            new=AsyncMock(side_effect=get_connection),
+        ):
+            result, batch = await track_heat_batch(
+                99,
+                ["can you send me a picture?"],
+                now=10,
+                direct_media_request=True,
+            )
+
+        self.assertEqual(batch, 1)
+        self.assertEqual((result.state.stage, result.state.progress), ("high", 3))
+        self.assertEqual(store.rows[99]["heat_stage"], "high")
+        self.assertEqual(store.rows[99]["heat_progress"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

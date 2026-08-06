@@ -12,7 +12,6 @@ therefore cancel their reservation without poisoning the candidate pool.
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from typing import Iterable, Mapping
@@ -109,18 +108,6 @@ class EntitlementRecord:
     first_opened_at: float | None
 
 
-@dataclass(frozen=True, slots=True)
-class MediaConfirmationRecord:
-    user_id: int
-    status: str
-    requested_type: str | None
-    tags: dict[str, tuple[str, ...]]
-    explicitness: str | None
-    asked_at_batch: int
-    expires_at: float
-    updated_at: float
-
-
 def _offer_from_row(row: Mapping[str, object]) -> OfferRecord:
     return OfferRecord(
         offer_id=int(row["id"]),
@@ -151,41 +138,6 @@ def _entitlement_from_row(row: Mapping[str, object]) -> EntitlementRecord:
             if row["first_opened_at"] is not None
             else None
         ),
-    )
-
-
-def _confirmation_from_row(row: Mapping[str, object]) -> MediaConfirmationRecord:
-    try:
-        raw_tags = json.loads(str(row["tags_json"] or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        raw_tags = {}
-    tags: dict[str, tuple[str, ...]] = {}
-    if isinstance(raw_tags, dict):
-        for group, values in raw_tags.items():
-            if not isinstance(group, str) or not isinstance(values, list):
-                continue
-            normalized = tuple(
-                value for value in values if isinstance(value, str) and value
-            )
-            if normalized:
-                tags[group] = normalized
-    return MediaConfirmationRecord(
-        user_id=int(row["user_id"]),
-        status=str(row["status"]),
-        requested_type=(
-            str(row["requested_type"])
-            if row["requested_type"] is not None
-            else None
-        ),
-        tags=tags,
-        explicitness=(
-            str(row["explicitness"])
-            if row["explicitness"] is not None
-            else None
-        ),
-        asked_at_batch=int(row["asked_at_batch"]),
-        expires_at=float(row["expires_at"]),
-        updated_at=float(row["updated_at"]),
     )
 
 
@@ -279,161 +231,6 @@ class MediaRepository:
                 """,
                 (user_id, asked_at_batch),
             )
-        finally:
-            await conn.close()
-
-    async def get_media_confirmation(
-        self, user_id: int, *, now: float | None = None
-    ) -> MediaConfirmationRecord | None:
-        """Return the user's live direct-media confirmation, if any.
-
-        Expiry cleanup and the read share the per-user advisory lock so a stale
-        row cannot race a newly staged confirmation from another worker.
-        """
-
-        checked_at = time.time() if now is None else float(now)
-        conn = await get_connection()
-        try:
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(?)", (user_id,))
-                await conn.execute(
-                    "DELETE FROM media_request_confirmations "
-                    "WHERE user_id = ? AND expires_at < ?",
-                    (user_id, checked_at),
-                )
-                cursor = await conn.execute(
-                    "SELECT * FROM media_request_confirmations WHERE user_id = ?",
-                    (user_id,),
-                )
-                row = await cursor.fetchone()
-                return _confirmation_from_row(row) if row else None
-        finally:
-            await conn.close()
-
-    async def stage_media_confirmation(
-        self,
-        user_id: int,
-        *,
-        requested_type: str | None,
-        tags: Mapping[str, Iterable[str]],
-        explicitness: str | None,
-        asked_at_batch: int,
-        expires_at: float,
-        now: float | None = None,
-    ) -> MediaConfirmationRecord:
-        """Persist the normalized request only after Mia's question is visible."""
-
-        if requested_type not in {None, "photo", "video"}:
-            raise ValueError("requested_type must be photo, video, or None")
-        if explicitness not in {None, "tease", "suggestive", "nude", "explicit"}:
-            raise ValueError("unsupported explicitness")
-        safe_tags = {
-            str(group): [str(value) for value in values]
-            for group, values in tags.items()
-            if str(group) and values
-        }
-        tags_json = json.dumps(safe_tags, sort_keys=True, separators=(",", ":"))
-        updated_at = time.time() if now is None else float(now)
-        conn = await get_connection()
-        try:
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(?)", (user_id,))
-                cursor = await conn.execute(
-                    """
-                    INSERT INTO media_request_confirmations
-                        (user_id, status, requested_type, tags_json, explicitness,
-                         asked_at_batch, expires_at, updated_at)
-                    VALUES (?, 'pending', ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        status = 'pending',
-                        requested_type = EXCLUDED.requested_type,
-                        tags_json = EXCLUDED.tags_json,
-                        explicitness = EXCLUDED.explicitness,
-                        asked_at_batch = EXCLUDED.asked_at_batch,
-                        expires_at = EXCLUDED.expires_at,
-                        updated_at = EXCLUDED.updated_at
-                    WHERE media_request_confirmations.asked_at_batch
-                          <= EXCLUDED.asked_at_batch
-                    RETURNING *
-                    """,
-                    (
-                        user_id,
-                        requested_type,
-                        tags_json,
-                        explicitness,
-                        asked_at_batch,
-                        float(expires_at),
-                        updated_at,
-                    ),
-                )
-                row = await cursor.fetchone()
-                if row is None:
-                    raise MediaUnavailableError(
-                        "A newer media confirmation already exists"
-                    )
-                return _confirmation_from_row(row)
-        finally:
-            await conn.close()
-
-    async def grant_media_confirmation(
-        self,
-        user_id: int,
-        *,
-        batch_number: int,
-        max_batch_gap: int,
-        granted_until: float,
-        now: float | None = None,
-    ) -> MediaConfirmationRecord | None:
-        """Atomically consume a live pending question into a session grant."""
-
-        checked_at = time.time() if now is None else float(now)
-        conn = await get_connection()
-        try:
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(?)", (user_id,))
-                cursor = await conn.execute(
-                    """
-                    UPDATE media_request_confirmations
-                    SET status = 'granted', expires_at = ?, updated_at = ?
-                    WHERE user_id = ?
-                      AND status = 'pending'
-                      AND expires_at >= ?
-                      AND asked_at_batch < ?
-                      AND ? - asked_at_batch <= ?
-                    RETURNING *
-                    """,
-                    (
-                        float(granted_until),
-                        checked_at,
-                        user_id,
-                        checked_at,
-                        batch_number,
-                        batch_number,
-                        max(1, int(max_batch_gap)),
-                    ),
-                )
-                row = await cursor.fetchone()
-                if row:
-                    return _confirmation_from_row(row)
-                await conn.execute(
-                    "DELETE FROM media_request_confirmations "
-                    "WHERE user_id = ? AND (status = 'pending' OR expires_at < ?)",
-                    (user_id, checked_at),
-                )
-                return None
-        finally:
-            await conn.close()
-
-    async def clear_media_confirmation(
-        self, user_id: int, *, pending_only: bool = False
-    ) -> bool:
-        conn = await get_connection()
-        try:
-            sql = "DELETE FROM media_request_confirmations WHERE user_id = ?"
-            if pending_only:
-                sql += " AND status = 'pending'"
-            cursor = await conn.execute(sql + " RETURNING user_id", (user_id,))
-            return await cursor.fetchone() is not None
         finally:
             await conn.close()
 
@@ -688,7 +485,6 @@ class MediaRepository:
                     )
                 if offer.trigger in {
                     "direct",
-                    "confirmed_direct",
                     "permission_reask",
                 }:
                     await conn.execute(
@@ -959,6 +755,23 @@ class MediaRepository:
                     """,
                     (user_id, content_id, parsed_offer_id, transaction_id, now),
                 )
+                # An unlock is durable visual context even if the original
+                # offer was shown many chat turns earlier. Store the current
+                # processed-batch position once; idempotent replays return
+                # above and cannot keep extending the context window.
+                await conn.execute(
+                    """
+                    INSERT INTO engagement_state (user_id, last_media_unlock_batch)
+                    VALUES (?, 0)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        last_media_unlock_batch = GREATEST(
+                            COALESCE(engagement_state.last_media_unlock_batch, 0),
+                            COALESCE(engagement_state.total_messages, 0),
+                            COALESCE(engagement_state.heat_last_batch, 0)
+                        )
+                    """,
+                    (user_id,),
+                )
                 # A planner may have reserved this item just before the unlock.
                 # It must never later finalize into a newly locked resale card.
                 await conn.execute(
@@ -1059,7 +872,8 @@ class MediaRepository:
                         sales_reask_pending = FALSE,
                         sales_reask_asked_at_batch = NULL,
                         last_proactive_media_batch = NULL,
-                        last_generic_media_type = NULL
+                        last_generic_media_type = NULL,
+                        last_media_unlock_batch = NULL
                     WHERE user_id = ?
                     """,
                     (user_id,),

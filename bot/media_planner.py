@@ -31,11 +31,17 @@ _GENERIC_REQUESTS = (
     "want to see you",
     "i want to see you",
     "can i see you",
+    "could i see you",
+    "may i see you",
     "see you now",
-    "искам да те видя",
-    "може ли да те видя",
-    "покажи ми се",
-    "искам да те гледам",
+    "show me what you're wearing",
+    "show me what you are wearing",
+    "can i see what you're wearing",
+    "can i see what you are wearing",
+    "i want to see what you're wearing",
+    "i want to see what you are wearing",
+    "i wish i could see you right now",
+    "wish i could see you right now",
 )
 
 _REQUEST_CUES = (
@@ -47,30 +53,75 @@ _REQUEST_CUES = (
     "can i have",
     "could i have",
     "may i have",
-    "want",
-    "wanna",
+    "can i get",
+    "could i get",
+    "may i get",
+    "i want",
+    "i wanna",
+    "i need",
     "give me",
-    "прати",
-    "пратиш",
-    "изпрати",
-    "изпратиш",
-    "покажи",
-    "искам",
-    "може ли",
-    "може ли да видя",
-    "дай ми",
+    "drop me",
+    "share me",
+    "share with me",
+    "share a",
+    "share some",
 )
 
-_POLITE_REQUEST_WORDS = frozenset({"please", "pls", "моля"})
+_CONTEXTUAL_REQUESTS = frozenset(
+    {
+        "another one",
+        "one more",
+        "more",
+        "show me another",
+        "show me more",
+        "send another",
+        "send me another",
+        "send more",
+        "send me more",
+        "something else",
+    }
+)
+
+_CONTEXTUAL_MARKERS = frozenset(
+    {
+        "another",
+        "more",
+        "instead",
+        "else",
+    }
+)
+
+_POLITE_REQUEST_WORDS = frozenset({"please", "pls"})
 
 _MEDIA_TYPE_PLURAL_ALIASES: Mapping[str, tuple[str, ...]] = {
     "photo": ("photos", "pictures", "pics", "selfies"),
     "video": ("videos", "clips", "vids"),
 }
 
+_VISUAL_CONTENT_TERMS = ("content",)
+_UNSUPPORTED_SCRIPT_RE = re.compile(
+    r"[\u0400-\u052f\u0600-\u06ff\u4e00-\u9fff\u3040-\u30ff]"
+)
+
 _INVENTORY_REQUEST_PREFIX_RE = re.compile(
     r"^(?:do\s+you\s+(?:have|sell|offer)|have\s+you\s+got|"
     r"you\s+got|got)\s+",
+    re.IGNORECASE,
+)
+
+_PRICE_REQUEST_RE = re.compile(
+    r"^(?:how\s+much(?:\s+(?:is|are|for|do\s+you\s+charge\s+for))?|"
+    r"what(?:'s|\s+is)\s+the\s+price(?:\s+of|\s+for)?|"
+    r"what\s+do\s+you\s+charge\s+for)\b",
+    re.IGNORECASE,
+)
+
+_CONTEXTUAL_REFINEMENT_RE = re.compile(
+    r"^(?:(?:what|how)\s+about|and|maybe)\s+(?:a\s+|an\s+|some\s+)?"
+    r"(?:photo|photos|picture|pictures|pic|pics|selfie|selfies|"
+    r"video|videos|clip|clips|vid|vids|nude|nudes)(?:\s+instead)?$|"
+    r"^(?:a\s+|an\s+)?(?:photo|picture|pic|selfie|video|clip|vid)"
+    r"\s+instead$",
     re.IGNORECASE,
 )
 
@@ -83,12 +134,6 @@ _SOFT_DECLINES = (
     "don't sell me content",
     "dont sell me content",
     "do not sell me content",
-    "не сега",
-    "не ми пращай",
-    "не ми продавай контент",
-    "не ми продавай съдържание",
-    "не искам",
-    "няма нужда",
     "don't want",
     "dont want",
     "do not want",
@@ -104,9 +149,6 @@ _GLOBAL_SOFT_DECLINES = (
     "don't sell me content",
     "dont sell me content",
     "do not sell me content",
-    "не ми пращай",
-    "не ми продавай контент",
-    "не ми продавай съдържание",
 )
 
 _HARD_DECLINES = (
@@ -115,10 +157,47 @@ _HARD_DECLINES = (
     "do not ever ask",
     "never send me",
     "stop asking forever",
-    "никога повече не ме питай",
-    "не ме питай повече никога",
-    "никога не ми пращай",
-    "спри завинаги",
+)
+
+_NEGATIVE_REQUEST_RE = re.compile(
+    r"(?:\b(?:don't|dont|do\s+not|can't|cannot|won't|wouldn't)\b.*"
+    r"\b(?:send|show|give|share|want|need|photo|picture|pic|video|clip|nude)s?\b|"
+    r"\b(?:no|without)\s+(?:more\s+)?"
+    r"(?:photos?|pictures?|pics?|videos?|clips?|nudes?)\b)",
+    re.IGNORECASE,
+)
+
+_TRAILING_NEGATIVE_RE = re.compile(
+    r"(?:^|[,;.!?]\s*|\b(?:but|actually|wait|sorry)\s+)"
+    r"(?:no|nope|nah|never\s+mind|forget\s+it|"
+    r"cancel(?:\s+(?:it|that))?|i\s+changed\s+my\s+mind)\s*[.!?]*$",
+    re.IGNORECASE,
+)
+
+_REPORTED_OR_PAST_RE = re.compile(
+    r"^(?:(?:yesterday|earlier|previously|before|last\s+"
+    r"(?:night|week|time))\s+)?"
+    r"(?:i|we|you|he|she|they|mia|tyler|my\s+friend|someone)\s+"
+    r"(?:said|says|told|asked|wanted|needed|wrote|texted|mentioned|"
+    r"watched|saw|sent|showed|shared|had|bought|opened|unlocked|"
+    r"received|liked|were\s+going|was\s+going)\b|"
+    r"^(?:remember\s+when|the\s+(?:message|prompt|story|novel|character)\s+"
+    r"(?:said|says))\b",
+    re.IGNORECASE,
+)
+
+_REPORTING_BEFORE_COMMAND_RE = re.compile(
+    r"\b(?:said|says|told|asked|wrote|texted|quoted)\b[^.!?\n]{0,80}\b"
+    r"(?:send|show|give|share)\b",
+    re.IGNORECASE,
+)
+
+_QUOTED_SEGMENT_RE = re.compile(r'["“”„«»`]([^"“”„«»`]+)["“”„«»`]')
+_SINGLE_QUOTED_SEGMENT_RE = re.compile(r"(?<!\w)'([^']+)'(?!\w)")
+
+_EXTERNAL_MEDIA_TARGET_RE = re.compile(
+    r"\b(?:photo|picture|pic|selfie|video|clip|vid)s?\s+of\s+(.+)$",
+    re.IGNORECASE,
 )
 
 _AFFIRMATIVES = frozenset(
@@ -140,12 +219,6 @@ _AFFIRMATIVES = frozenset(
         "show me",
         "let me see",
         "give it to me",
-        "да",
-        "да моля",
-        "искам",
-        "може",
-        "добре",
-        "ок",
     }
 )
 
@@ -159,15 +232,24 @@ def _contains_phrase(text: str, phrase: str) -> bool:
     return re.search(pattern, text, flags=re.UNICODE) is not None
 
 
+def _english_aliases(aliases: Sequence[str]) -> tuple[str, ...]:
+    """Keep the catalog vocabulary while excluding unsupported scripts."""
+    return tuple(alias for alias in aliases if alias.isascii())
+
+
 def _media_type_aliases(media_type: str) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(
             (
-                *MEDIA_TYPE_ALIASES[media_type],
+                *_english_aliases(MEDIA_TYPE_ALIASES[media_type]),
                 *_MEDIA_TYPE_PLURAL_ALIASES.get(media_type, ()),
             )
         )
     )
+
+
+def _explicitness_aliases(level: str) -> tuple[str, ...]:
+    return _english_aliases(EXPLICITNESS_ALIASES[level])
 
 
 def _generic_request_phrase(text: str) -> str:
@@ -187,6 +269,87 @@ def _generic_request_phrase(text: str) -> str:
     return " ".join(words)
 
 
+def _contains_visual_term(text: str) -> bool:
+    if any(
+        _contains_phrase(text, alias)
+        for media_type in MEDIA_TYPE_ALIASES
+        for alias in _media_type_aliases(media_type)
+    ):
+        return True
+    if any(
+        _contains_phrase(text, alias)
+        for level in EXPLICITNESS_LEVELS
+        for alias in _explicitness_aliases(level)
+    ):
+        return True
+    return any(
+        _contains_phrase(text, alias)
+        for group in ("body_focus", "outfit", "activity")
+        for aliases in TAG_ALIASES[group].values()
+        for alias in _english_aliases(aliases)
+    )
+
+
+def _looks_reported_quoted_or_past(text: str) -> bool:
+    """Fail closed when request-shaped words are quoted or merely narrated."""
+    if _REPORTED_OR_PAST_RE.search(text) or _REPORTING_BEFORE_COMMAND_RE.search(text):
+        return True
+    stripped = text.strip()
+    if (
+        len(stripped) >= 2
+        and stripped[0] in "[("
+        and stripped[-1] in ")]"
+    ):
+        return True
+    quoted_segments = (
+        _QUOTED_SEGMENT_RE.findall(text) + _SINGLE_QUOTED_SEGMENT_RE.findall(text)
+    )
+    for quoted in quoted_segments:
+        quoted_text = _normalize(quoted)
+        has_request_words = any(
+            _contains_phrase(quoted_text, cue) for cue in _REQUEST_CUES
+        )
+        is_generic = _generic_request_phrase(quoted_text) in _GENERIC_REQUESTS
+        if is_generic or (has_request_words and _contains_visual_term(quoted_text)):
+            return True
+    return False
+
+
+def _has_external_media_target(
+    text: str,
+    *,
+    requested_type: str | None,
+) -> bool:
+    """Reject external-object photos/videos while allowing Mia-focused targets."""
+    if requested_type not in {"photo", "video"}:
+        return False
+    match = _EXTERNAL_MEDIA_TARGET_RE.search(text)
+    if match is None:
+        return False
+    target = _normalize(next(value for value in match.groups() if value is not None))
+    target = target.strip(" .,!?\"“”„«»")
+    if re.match(r"^(?:you|yourself)\b", target, re.IGNORECASE):
+        return False
+    if re.match(
+        r"^(?:what\s+you(?:'re|\s+are)\s+wearing|your\s+"
+        r"(?:outfit|clothes|look))\b",
+        target,
+        re.IGNORECASE,
+    ):
+        return False
+    return not _contains_visual_term(target)
+
+
+def _is_contextual_request_form(text: str, *, direct_candidate: bool) -> bool:
+    phrase = _generic_request_phrase(text)
+    if phrase in _CONTEXTUAL_REQUESTS:
+        return True
+    if _CONTEXTUAL_REFINEMENT_RE.fullmatch(phrase):
+        return True
+    words = set(re.findall(r"[^\W_]+", phrase, flags=re.UNICODE))
+    return bool(direct_candidate and words.intersection(_CONTEXTUAL_MARKERS))
+
+
 def _structured_short_request(
     text: str,
     *,
@@ -195,15 +358,17 @@ def _structured_short_request(
     explicitness: str | None,
 ) -> bool:
     """Recognize terse noun requests without turning ordinary mentions into sales."""
-    if requested_type is None:
+    if requested_type is None and explicitness not in {"nude", "explicit"}:
         return False
     residual = text
-    phrases: list[str] = list(_media_type_aliases(requested_type))
+    phrases: list[str] = (
+        list(_media_type_aliases(requested_type)) if requested_type else []
+    )
     for group, values in parsed_tags.items():
         for value in values:
-            phrases.extend(TAG_ALIASES[group][value])
+            phrases.extend(_english_aliases(TAG_ALIASES[group][value]))
     if explicitness:
-        phrases.extend(EXPLICITNESS_ALIASES[explicitness])
+        phrases.extend(_explicitness_aliases(explicitness))
     for phrase in sorted(set(phrases), key=len, reverse=True):
         residual = re.sub(
             r"(?<!\w)" + re.escape(phrase.casefold()) + r"(?!\w)",
@@ -233,16 +398,6 @@ def _structured_short_request(
         "the",
         "me",
         "her",
-        "една",
-        "едно",
-        "още",
-        "твоя",
-        "твое",
-        "от",
-        "в",
-        "на",
-        "моля",
-        "зад",
     }
     return remaining.issubset(allowed)
 
@@ -281,6 +436,11 @@ class MediaIntent:
     decline_kind: str | None = None
     decline_global: bool = False
     affirmative: bool = False
+    # A request-shaped command that deliberately failed the trust boundary
+    # (for example a quoted command or a photo of an external object). It is
+    # not a Mia-media request, but it remains decisive inside an ordered batch
+    # so an earlier command cannot leak through and attach a card.
+    blocked_request: bool = False
 
     @property
     def request_type(self) -> str | None:
@@ -289,14 +449,32 @@ class MediaIntent:
         return self.requested_type or "generic"
 
 
-def classify_media_intent(text: str) -> MediaIntent:
-    """Normalize one processed user batch into controlled media facets."""
+def _classify_media_intent_text(
+    text: str,
+    *,
+    recent_media_context: bool,
+) -> MediaIntent:
+    """Classify one raw user message without consulting the LLM."""
     normalized = _normalize(text)
+    if _UNSUPPORTED_SCRIPT_RE.search(normalized):
+        # English-only runtime: unsupported script is a decisive trust-boundary
+        # block so an earlier request in the same raw batch cannot leak through.
+        return MediaIntent(blocked_request=True)
 
     decline_kind = None
     if any(_contains_phrase(normalized, phrase) for phrase in _HARD_DECLINES):
         decline_kind = "hard"
     elif any(_contains_phrase(normalized, phrase) for phrase in _SOFT_DECLINES):
+        decline_kind = "soft"
+    elif _NEGATIVE_REQUEST_RE.search(normalized):
+        decline_kind = "soft"
+
+    bare_negative = normalized.strip(" .,!?") in {
+        "no",
+        "nope",
+        "nah",
+    }
+    if bare_negative and decline_kind is None:
         decline_kind = "soft"
 
     requested_types: list[str] = []
@@ -328,19 +506,25 @@ def classify_media_intent(text: str) -> MediaIntent:
     for group, values in TAG_ALIASES.items():
         matches: list[str] = []
         for canonical, aliases in values.items():
-            if any(_contains_phrase(normalized, alias) for alias in aliases):
+            if any(
+                _contains_phrase(normalized, alias)
+                for alias in _english_aliases(aliases)
+            ):
                 matches.append(canonical)
         if matches:
             parsed_tags[group] = tuple(matches)
 
     explicitness = None
     for level in reversed(EXPLICITNESS_LEVELS):
-        aliases = EXPLICITNESS_ALIASES[level]
+        aliases = _explicitness_aliases(level)
         if any(_contains_phrase(normalized, alias) for alias in aliases):
             explicitness = level
             break
 
     has_cue = any(_contains_phrase(normalized, cue) for cue in _REQUEST_CUES)
+    visual_content = any(
+        _contains_phrase(normalized, term) for term in _VISUAL_CONTENT_TERMS
+    ) and not _contains_phrase(normalized, "social media")
     short_media_phrase = _structured_short_request(
         normalized,
         requested_type=requested_type,
@@ -353,32 +537,60 @@ def classify_media_intent(text: str) -> MediaIntent:
         parsed_tags=parsed_tags,
         explicitness=explicitness,
     )
-    requested = generic or (
+    price_request = bool(
+        _PRICE_REQUEST_RE.search(normalized)
+        and (requested_type or parsed_tags or explicitness or visual_content)
+    )
+    direct_candidate = generic or (
         has_cue and bool(requested_type or parsed_tags or explicitness)
-    ) or short_media_phrase or inventory_request
+    ) or (has_cue and visual_content) or short_media_phrase or inventory_request
+    direct_candidate = direct_candidate or price_request
 
-    affirmative_text = normalized.strip(" .,!?")
+    contextual_form = _is_contextual_request_form(
+        normalized,
+        direct_candidate=direct_candidate,
+    )
+    requested = recent_media_context if contextual_form else direct_candidate
+
+    # A final refusal wins even when the same message began with an
+    # affirmative (for example ``yes, but no``). This must be evaluated
+    # independently of ``requested`` so a permission re-ask cannot promote
+    # the earlier "yes" into a media offer.
+    if _TRAILING_NEGATIVE_RE.search(normalized):
+        decline_kind = "soft"
+    blocked_request = bool(
+        requested
+        and (
+            _looks_reported_quoted_or_past(normalized)
+            or _has_external_media_target(
+                normalized,
+                requested_type=requested_type,
+            )
+        )
+    )
+    if blocked_request:
+        requested = False
+    if decline_kind is not None:
+        requested = False
+
+    affirmative_text = normalized.strip(" .,!?…")
     affirmative = affirmative_text in _AFFIRMATIVES
     if not affirmative:
-        affirmative = any(
-            affirmative_text.startswith(prefix)
-            for prefix in ("yes ", "yeah ", "sure ", "да ", "искам ")
+        affirmative = bool(
+            re.match(
+                r"^(?:yes|yeah|yep|sure|okay|ok)\b(?:\s|[,;.!?])",
+                affirmative_text,
+                flags=re.IGNORECASE,
+            )
         )
+    if decline_kind is not None:
+        affirmative = False
 
     decline_global = (
         decline_kind == "hard"
         or any(_contains_phrase(normalized, phrase) for phrase in _GLOBAL_SOFT_DECLINES)
         or bool(decline_kind and (requested_type or parsed_tags or explicitness))
     )
-    bare_negative = normalized.strip(" .,!?") in {
-        "no",
-        "nope",
-        "nah",
-        "не",
-        "не благодаря",
-    }
-    if bare_negative and decline_kind is None:
-        decline_kind = "soft"
 
     return MediaIntent(
         requested=requested,
@@ -388,7 +600,53 @@ def classify_media_intent(text: str) -> MediaIntent:
         decline_kind=decline_kind,
         decline_global=decline_global,
         affirmative=affirmative,
+        blocked_request=blocked_request,
     )
+
+
+def classify_media_intent(text: str) -> MediaIntent:
+    """Normalize one user message into controlled media facets.
+
+    This compatibility API deliberately has no implicit conversation context.
+    Use :func:`classify_media_intent_batch` when ordered raw messages or recent
+    media context are available.
+    """
+
+    return _classify_media_intent_text(text, recent_media_context=False)
+
+
+def classify_media_intent_batch(
+    messages: Sequence[str],
+    *,
+    recent_media_context: bool = False,
+) -> MediaIntent:
+    """Classify an ordered raw-message batch deterministically.
+
+    Each raw message is classified independently. The last decisive message
+    (a request or decline) wins, so a later correction supersedes an earlier
+    command without conflating hundreds of debounced messages into one string.
+    Contextual ellipsis is enabled only by the explicit boolean supplied by the
+    caller; activity earlier in this same batch does not manufacture context.
+    """
+
+    if isinstance(messages, (str, bytes)):
+        raise TypeError("messages must be a sequence of raw message strings")
+
+    last_intent = MediaIntent()
+    last_decisive: MediaIntent | None = None
+    for message in messages:
+        intent = _classify_media_intent_text(
+            message,
+            recent_media_context=recent_media_context,
+        )
+        last_intent = intent
+        if (
+            intent.requested
+            or intent.decline_kind is not None
+            or intent.blocked_request
+        ):
+            last_decisive = intent
+    return last_decisive or last_intent
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,7 +812,7 @@ class CatalogPlanner:
             # All suitable new candidates are exhausted. Prefer an old exact
             # match, otherwise the closest old item of the requested type.
             def repeat_allowed(item: MediaItem) -> bool:
-                if trigger in {"direct", "confirmed_direct", "permission_reask"}:
+                if trigger in {"direct", "permission_reask"}:
                     return True
                 return (
                     batch_number - last_by_content.get(item.id, -10**9)
