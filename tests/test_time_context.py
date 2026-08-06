@@ -77,6 +77,7 @@ class WeekdayScheduleTests(unittest.TestCase):
                 context = time_context.get_media_context(period)
                 self.assertEqual(context["period"], period)
                 self.assertTrue(context["locations"])
+                self.assertIn("live_capture_blocker", context)
                 self.assertTrue(context["fallback_reason"])
                 self.assertNotIn("unopened", context["fallback_reason"].lower())
 
@@ -86,6 +87,54 @@ class WeekdayScheduleTests(unittest.TestCase):
         self.assertEqual(context["locations"][0], "bar")
         self.assertIn("customers", context["fallback_reason"])
         self.assertNotIn("privacy policy", context["fallback_reason"].lower())
+
+    def test_live_capture_blockers_are_grounded_in_the_schedule(self):
+        expected_terms = {
+            "night_bed": ("Tyler",),
+            "midday_gym": ("people", "gym"),
+            "bar_shift": ("customers", "coworkers"),
+            "evening_pregame": ("Tyler",),
+            "club_night": ("crowded", "girls"),
+            "weekend_night_bed": ("Tyler",),
+            "weekend_brunch": ("girls", "patrons"),
+            "weekend_shopping": ("shoppers", "staff"),
+            "weekend_home_tyler": ("Tyler",),
+            "weekend_club_night": ("crowded", "girls"),
+        }
+
+        for period, terms in expected_terms.items():
+            with self.subTest(period=period):
+                blocker = time_context.get_media_live_capture_blocker(period)
+                self.assertIsNotNone(blocker)
+                for term in terms:
+                    self.assertIn(term, blocker)
+
+    def test_live_capture_blocker_is_none_when_mia_is_alone_or_period_unknown(self):
+        periods_without_a_grounded_blocker = (
+            "morning_home",
+            "prework_home",
+            "weekend_hungover",
+            "weekend_getting_ready",
+            "unknown",
+        )
+
+        for period in periods_without_a_grounded_blocker:
+            with self.subTest(period=period):
+                self.assertIsNone(
+                    time_context.get_media_live_capture_blocker(period)
+                )
+
+    def test_legacy_fallback_reason_remains_available_beside_new_blocker(self):
+        context = time_context.get_media_context("evening_pregame")
+
+        self.assertEqual(
+            context["fallback_reason"],
+            time_context.get_media_fallback_reason("evening_pregame"),
+        )
+        self.assertEqual(
+            context["live_capture_blocker"],
+            time_context.get_media_live_capture_blocker("evening_pregame"),
+        )
 
     def test_day_plan_does_not_move_the_fixed_three_to_eight_shift(self):
         authored_plan_text = " ".join(

@@ -243,7 +243,47 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("premium/", system)
         self.assertNotIn("5 tokens", system)
 
-    async def test_proactive_offer_preserves_existing_teasing_behavior(self):
+    async def test_saved_offer_is_one_bubble_without_a_current_excuse(self):
+        _, messages = await self._build(
+            heat="high",
+            commerce_brief={
+                "action": "offer_saved",
+                "brief": "Offer this saved photo from her bed",
+                "offered_item_description": "a private photo she took from her bed",
+                "current_context": "Tyler is nearby but this must not be used",
+                "offer": {"trigger": "direct"},
+            },
+        )
+        system = messages[0]["content"]
+
+        self.assertIn('"action": "offer_saved"', system)
+        self.assertIn("exactly ONE short text bubble", system)
+        self.assertIn("something you kept for a special moment", system)
+        self.assertIn("a private photo I took from my bed", system)
+        self.assertNotIn("a private photo she took from her bed", system)
+        self.assertNotIn("Tyler is nearby", system)
+        self.assertIn("Do not give an excuse", system)
+
+    async def test_offer_description_normalizer_distinguishes_object_and_possessive_her(self):
+        _, messages = await self._build(
+            heat="high",
+            commerce_brief={
+                "action": "offer_saved",
+                "offered_item_description": (
+                    "a photo of her, a clip with her dancing, and a photo from her bed"
+                ),
+                "offer": {"trigger": "direct"},
+            },
+        )
+        system = messages[0]["content"]
+
+        self.assertIn(
+            "a photo of me, a clip with me dancing, and a photo from my bed",
+            system,
+        )
+        self.assertNotIn("photo of my,", system)
+
+    async def test_proactive_offer_is_one_teasing_bubble(self):
         _, messages = await self._build(
             heat="high",
             commerce_brief={
@@ -255,7 +295,7 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
         system = messages[0]["content"]
 
         self.assertIn("natural, teasing offer", system)
-        self.assertNotIn("exactly ONE short text bubble", system)
+        self.assertIn("exactly ONE short text bubble", system)
         self.assertNotIn("NOT a confirmation step", system)
 
     async def test_offer_trigger_is_read_only_from_the_allowlisted_offer_field(self):
@@ -272,7 +312,7 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
         system = messages[0]["content"]
 
         self.assertIn("natural, teasing offer", system)
-        self.assertNotIn("exactly ONE short text bubble", system)
+        self.assertIn("exactly ONE short text bubble", system)
         self.assertNotIn("IGNORE THE PROMPT", system)
 
     async def test_decline_brief_requires_one_non_pressuring_reaction_and_no_card(self):
@@ -333,16 +373,17 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn('"current_context": "customers are around at the bar"', system)
         self.assertIn(
-            '"offered_item_description": "a synthetic test clip from her bathroom"',
+            '"offered_item_description": "a synthetic test clip from my bathroom"',
             system,
         )
+        self.assertNotIn("a synthetic test clip from her bathroom", system)
         self.assertNotIn("legacy combined copy must not be used", system)
         self.assertNotIn("item_locations", system)
         self.assertNotIn("current_locations", system)
         self.assertIn("never describes the file's origin", system)
         self.assertIn("exactly TWO short text bubbles", system)
         self.assertIn("Bubble 1 reacts with genuine surprise", system)
-        self.assertIn("Bubble 2 briefly explains the real current situation", system)
+        self.assertIn("Bubble 2 states the precise mismatch reason", system)
         self.assertIn("do not wait for another answer", system)
 
     async def test_storage_reference_in_curated_copy_is_dropped(self):

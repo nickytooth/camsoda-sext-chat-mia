@@ -8,6 +8,10 @@ from enum import Enum
 from typing import Sequence
 
 from bot import config
+from bot.media_copy import (
+    spoken_fallback_context as _spoken_fallback_context,
+    spoken_item_description as _spoken_item_description,
+)
 from bot.media_catalog import MediaCatalog, MediaItem, load_media_catalog
 from bot.media_planner import (
     CatalogPlanner,
@@ -36,6 +40,7 @@ from bot.time_context import get_media_locations
 
 class CommerceAction(str, Enum):
     OFFER_CURRENT = "offer_current"
+    OFFER_SAVED = "offer_saved"
     OFFER_FALLBACK = "offer_fallback"
     REACT_TO_DECLINE = "react_to_decline"
     ASK_PERMISSION_AGAIN = "ask_permission_again"
@@ -212,15 +217,29 @@ class MediaCommerceService:
                     batch_number=batch_number,
                 )
             return CommerceDecision()
+        spoken_item_description = _spoken_item_description(planned.description)
         current_context = ""
         if planned.action == CommerceAction.OFFER_CURRENT.value:
-            brief = f"Offer this real {planned.item.media_type}: {planned.description}."
+            brief = (
+                f"Offer this real current {planned.item.media_type}: "
+                f"{spoken_item_description}."
+            )
+        elif planned.action == CommerceAction.OFFER_SAVED.value:
+            brief = (
+                f"Offer this real saved {planned.item.media_type} as something I kept "
+                f"for a special moment: {spoken_item_description}. Do not give a current-"
+                "capture excuse."
+            )
         else:
-            reason = planned.fallback_reason or "There is no unopened exact-current match."
+            reason = _spoken_fallback_context(
+                planned.fallback_reason
+                or "The exact requested match is unavailable."
+            )
             current_context = reason
             brief = (
-                f"Current context: {reason}. Offer this real alternative as an older or "
-                f"different-location {planned.item.media_type}: {planned.description}."
+                f"Fallback reason: {reason}. Offer this real backend-selected alternative "
+                f"{planned.item.media_type}: {spoken_item_description}. State only that "
+                "precise mismatch reason and do not invent an excuse."
             )
         offer = MediaOffer(
             offer_id=record.offer_id,
@@ -240,7 +259,7 @@ class MediaCommerceService:
             brief=brief,
             offer=offer,
             current_context=current_context,
-            offered_item_description=planned.description,
+            offered_item_description=spoken_item_description,
             user_id=user_id,
             batch_number=batch_number,
             item_locations=tuple(planned.item.tags.get("location", ())),
@@ -381,6 +400,7 @@ class MediaCommerceService:
                 requested_type=intent.requested_type,
                 tags=intent.tags,
                 explicitness=intent.explicitness,
+                requires_current=intent.requires_current,
                 affirmative=True,
             )
         return intent
@@ -481,6 +501,7 @@ class MediaCommerceService:
                     requested_type=intent.requested_type,
                     tags=intent.tags,
                     explicitness=intent.explicitness,
+                    requires_current=intent.requires_current,
                     affirmative=True,
                 )
                 return await self._reserve_planned(
@@ -575,6 +596,7 @@ class MediaCommerceService:
         """Cancel presentation only; a user's durable refusal is never undone."""
         return decision.action not in {
             CommerceAction.OFFER_CURRENT,
+            CommerceAction.OFFER_SAVED,
             CommerceAction.OFFER_FALLBACK,
         }
 

@@ -58,6 +58,7 @@ from bot.output_guard import (
     validate_user_suggestion,
 )
 from bot.media_planner import classify_media_intent_batch
+from bot.media_copy import spoken_fallback_context, spoken_item_description
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,7 @@ class ChatResponse:
 _COMMERCE_ACTIONS = frozenset(
     {
         "offer_current",
+        "offer_saved",
         "offer_fallback",
         "react_to_decline",
         "ask_permission_again",
@@ -696,7 +698,7 @@ class ChatEngine:
 
         action = _commerce_action_value(decision)
         offer = _safe_offer_payload(_object_value(decision, "offer"))
-        if action in {"offer_current", "offer_fallback"}:
+        if action in {"offer_current", "offer_saved", "offer_fallback"}:
             if offer is None:
                 logger.error(
                     "Commerce planner returned %s without a complete safe offer for user %d",
@@ -1856,7 +1858,14 @@ class ChatEngine:
                     else None
                 ),
                 commerce_media_description=(
-                    str(commerce_turn.media_offer.get("description", ""))
+                    str(
+                        _object_value(
+                            commerce_turn.decision,
+                            "offered_item_description",
+                            "",
+                        )
+                        or ""
+                    )
                     if commerce_turn.media_offer
                     else None
                 ),
@@ -2116,9 +2125,8 @@ class ChatEngine:
     ) -> list[str]:
         """Apply deterministic bubble counts to backend-authorised offers.
 
-        Ordinary/proactive chat keeps the natural weighted 1--3 spread. A
-        direct current offer is one compact teaser before the card; a direct
-        fallback is exactly two bubbles so its current-context explanation can
+        Current and saved offers use one compact teaser before the card;
+        fallbacks use exactly two bubbles so their mismatch explanation can
         never be folded away. Unavailable direct requests are one text-only
         bubble and cannot look like a dangling offer sequence.
         """
@@ -2127,15 +2135,8 @@ class ChatEngine:
             packed = cls._repack_to_n(text, 1)
             return packed[:1] or [text.strip()]
 
-        offer = _object_value(turn.decision, "offer") if turn.decision else None
-        trigger = str(_object_value(offer, "trigger", "") or "")
-        immediate = trigger in {"direct", "permission_reask"}
-        if not turn.media_offer or not immediate:
+        if not turn.media_offer:
             return cls._split_response(text, vary=True)
-
-        if turn.action == "offer_current":
-            packed = cls._repack_to_n(text, 1)
-            return packed[:1] or [text.strip()]
 
         if turn.action == "offer_fallback":
             packed = cls._repack_to_n(text, 2)
@@ -2145,39 +2146,11 @@ class ChatEngine:
                 parts = cls._force_two_offer_bubbles(text)
             return cls._ensure_fallback_context(parts, turn)
 
+        if turn.action in {"offer_current", "offer_saved"}:
+            packed = cls._repack_to_n(text, 1)
+            return packed[:1] or [text.strip()]
+
         return cls._split_response(text, vary=True)
-
-    _FALLBACK_CONTEXT_STOPWORDS = frozenset(
-        {
-            "already",
-            "around",
-            "close",
-            "exact",
-            "kind",
-            "loves",
-            "pivots",
-            "right",
-            "she",
-            "something",
-            "there",
-            "they",
-            "with",
-        }
-    )
-
-    @classmethod
-    def _fallback_context_is_present(cls, text: str, context: str) -> bool:
-        """Whether bubble two contains a concrete anchor from trusted context."""
-
-        visible = set(re.findall(r"[^\W_]+", text.casefold(), flags=re.UNICODE))
-        anchors = {
-            word
-            for word in re.findall(
-                r"[^\W_]+", context.casefold(), flags=re.UNICODE
-            )
-            if len(word) >= 4 and word not in cls._FALLBACK_CONTEXT_STOPWORDS
-        }
-        return bool(visible.intersection(anchors))
 
     @staticmethod
     def _naturalize_fallback_context(context: object) -> str:
@@ -2187,28 +2160,17 @@ class ChatEngine:
         if not value or _UNSAFE_MEDIA_METADATA_RE.search(value):
             return "i can't make that exact one right here"
         value = re.split(r",?\s+so\s+she\s+pivots\b", value, maxsplit=1, flags=re.I)[0]
-        replacements = (
-            (r"\bshe\s+has\s+not\b", "i haven't"),
-            (r"\bshe\s+is\b", "i'm"),
-            (r"\bshe\s+has\b", "i've"),
-            (r"\bhas\s+not\b", "haven't"),
-            (r"\baround\s+her\b", "around me"),
-            (r"\bher\b", "me"),
-            (r"\bshe\b", "i"),
+        return (
+            spoken_fallback_context(value)
+            or "i can't make that exact one right here"
         )
-        for pattern, replacement in replacements:
-            value = re.sub(pattern, replacement, value, flags=re.I)
-        return value.strip(" ,.;") or "i can't make that exact one right here"
 
     @staticmethod
     def _naturalize_media_description(description: object) -> str:
         value = " ".join(str(description or "").split())[:240]
         if not value or _UNSAFE_MEDIA_METADATA_RE.search(value):
             return "the closest private one i already have"
-        value = re.sub(r"\bMia's\b", "my", value, flags=re.I)
-        value = re.sub(r"\bher\b", "my", value, flags=re.I)
-        value = re.sub(r"\bMia\b", "me", value, flags=re.I)
-        return value.strip(" ,.;")
+        return spoken_item_description(value)
 
     @classmethod
     def _ensure_fallback_context(
@@ -2221,12 +2183,13 @@ class ChatEngine:
         current_context = str(
             _object_value(turn.decision, "current_context", "") or ""
         )
-        if cls._fallback_context_is_present(parts[1], current_context):
-            return parts
-
         reason = cls._naturalize_fallback_context(current_context)
         description = cls._naturalize_media_description(
-            (turn.media_offer or {}).get("description", "")
+            _object_value(
+                turn.decision,
+                "offered_item_description",
+                "",
+            )
         )
         return [
             parts[0],

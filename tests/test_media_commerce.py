@@ -3,13 +3,21 @@ import random
 import unittest
 from pathlib import Path
 
-from bot.media_catalog import load_media_catalog
-from bot.media_commerce import CommerceAction, MediaCommerceService
+from bot.media_catalog import MediaCatalog, MediaPresentation, load_media_catalog
+from bot.media_commerce import (
+    CommerceAction,
+    MediaCommerceService,
+    _spoken_fallback_context,
+    _spoken_item_description,
+)
 from bot.media_planner import classify_media_intent
 from bot.media_repository import OfferRecord
 
 
 CATALOG_PATH = Path(__file__).resolve().parent / "fixtures" / "media_catalog.yaml"
+PRODUCTION_CATALOG_PATH = (
+    Path(__file__).resolve().parents[1] / "library" / "media_catalog.yaml"
+)
 
 
 class FakeRepository:
@@ -128,6 +136,42 @@ class FakeRepository:
 
 
 class MediaIntentTests(unittest.TestCase):
+    def test_catalog_copy_is_rendered_in_mias_first_person_voice(self):
+        cases = {
+            "a photo from her bed": "a photo from my bed",
+            "a playful photo she took at home": "a playful photo I took at home",
+            "Mia's private bathroom clip": "my private bathroom clip",
+            "a photo of her": "a photo of me",
+            "a clip with her dancing": "a clip with me dancing",
+            "a photo of her in bed": "a photo of me in bed",
+            "a clip with her on the couch": "a clip with me on the couch",
+            "a photo of her body": "a photo of my body",
+            "a photo of herself in bed": "a photo of me in bed",
+            "Mia is posing in her bedroom": "I am posing in my bedroom",
+            "Mia was posing in her bedroom": "I was posing in my bedroom",
+            "Mia has saved this photo": "I have saved this photo",
+            "she's posing in her bedroom": "I'm posing in my bedroom",
+            "she hasn't shared this photo": "I haven't shared this photo",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(_spoken_item_description(raw), expected)
+
+        self.assertEqual(
+            _spoken_fallback_context("Tyler is asleep beside her"),
+            "Tyler is asleep beside me",
+        )
+        self.assertEqual(
+            _spoken_fallback_context("she is home getting ready"),
+            "I am home getting ready",
+        )
+        self.assertEqual(
+            _spoken_fallback_context(
+                "customers and coworkers are around her at the bar"
+            ),
+            "customers and coworkers are around me at the bar",
+        )
+
     def test_inventory_video_question_is_direct_but_story_mentions_are_not(self):
         inventory = classify_media_intent("do you have any videos?")
         self.assertTrue(inventory.requested)
@@ -438,7 +482,12 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
             1, "more flirting", batch_number=16, heat="high", period="bar_shift"
         )
         self.assertIn(
-            ready.action, {CommerceAction.OFFER_CURRENT, CommerceAction.OFFER_FALLBACK}
+            ready.action,
+            {
+                CommerceAction.OFFER_CURRENT,
+                CommerceAction.OFFER_SAVED,
+                CommerceAction.OFFER_FALLBACK,
+            },
         )
 
     async def test_low_heat_never_gets_proactive_offer(self):
@@ -481,10 +530,174 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, CommerceAction.OFFER_CURRENT)
         self.assertEqual(decision.item_locations, ("bar", "bathroom"))
         self.assertEqual(decision.current_locations, ("bar", "stockroom"))
-        self.assertEqual(
-            decision.offered_item_description,
-            decision.offer.description,
+        self.assertIn("my bar shift", decision.offered_item_description)
+        self.assertIn("her bar shift", decision.offer.description)
+        self.assertNotEqual(decision.offered_item_description, decision.offer.description)
+
+    async def test_exact_past_only_match_is_a_saved_offer_with_spoken_copy(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "send me a pic from your pussy",
+            batch_number=1,
+            heat="high",
+            period="evening_pregame",
         )
+
+        self.assertEqual(decision.action, CommerceAction.OFFER_SAVED)
+        self.assertEqual(decision.offer.content_id, "mia_private_nude_001")
+        self.assertIn("from my bedroom", decision.offered_item_description)
+        self.assertIn("from her bedroom", decision.offer.description)
+        self.assertEqual(decision.current_context, "")
+        self.assertIn("special moment", decision.brief)
+        self.assertNotIn("Tyler", decision.brief)
+
+    async def test_live_past_only_match_uses_grounded_blocker_and_fallback(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "show me a photo of your pussy right now",
+            batch_number=1,
+            heat="high",
+            period="evening_pregame",
+        )
+
+        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+        self.assertEqual(decision.offer.content_id, "mia_private_nude_001")
+        self.assertIn("Tyler is on the couch", decision.current_context)
+        self.assertIn("I cannot capture", decision.current_context)
+        self.assertNotIn(" she ", f" {decision.current_context.lower()} ")
+        self.assertIn("from my bedroom", decision.offered_item_description)
+
+    async def test_live_fallback_when_alone_never_invents_a_person(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "show me a photo of your pussy right now",
+            batch_number=1,
+            heat="high",
+            period="morning_home",
+        )
+
+        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+        self.assertIn("I do not have a fresh version", decision.current_context)
+        for invented in ("Tyler", "friend", "girl", "customer", "coworker"):
+            self.assertNotIn(invented, decision.current_context)
+
+    async def test_split_production_pussy_request_selects_exact_saved_photo(self):
+        repository = FakeRepository()
+        service = MediaCommerceService(
+            load_media_catalog(PRODUCTION_CATALOG_PATH),
+            repository=repository,
+            random_source=random.Random(7),
+        )
+        intent = await service.classify_media_turn(
+            1,
+            ["send me a pic", "from your pussy"],
+            batch_number=1,
+        )
+        decision = await service.plan_commerce_turn(
+            1,
+            "from your pussy",
+            batch_number=1,
+            heat="low",
+            period="evening_pregame",
+            intent=intent,
+        )
+
+        self.assertEqual(decision.offer.content_id, "mia_bedroom_001")
+        self.assertEqual(decision.action, CommerceAction.OFFER_SAVED)
+        self.assertEqual(decision.current_context, "")
+
+    async def test_exact_alternate_video_beats_unrelated_requested_photo(self):
+        catalog = load_media_catalog(CATALOG_PATH)
+        club_video = catalog.require("mia_club_clip_001")
+        pussy_video = dataclasses.replace(
+            club_video,
+            tags={**club_video.tags, "body_focus": ("pussy", "full_body")},
+        )
+        repository = FakeRepository()
+        repository.unlocked.add("mia_private_nude_001")
+        service = MediaCommerceService(
+            MediaCatalog(
+                pussy_video if item.id == pussy_video.id else item
+                for item in catalog.items
+            ),
+            repository=repository,
+            random_source=random.Random(7),
+        )
+
+        decision = await service.plan_commerce_turn(
+            1,
+            "send me a photo of your pussy",
+            batch_number=1,
+            heat="high",
+            period="morning_home",
+        )
+
+        self.assertEqual(decision.offer.content_id, "mia_club_clip_001")
+        self.assertEqual(decision.offer.media_type, "video")
+        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+
+    async def test_exact_alternate_photo_beats_unrelated_requested_video(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "send me a video behind the bar",
+            batch_number=1,
+            heat="high",
+            period="morning_home",
+        )
+
+        self.assertEqual(decision.offer.content_id, "mia_bar_001")
+        self.assertEqual(decision.offer.media_type, "photo")
+        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+
+    async def test_exact_requested_type_remains_ahead_of_exact_alternate_type(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "send me a photo of your boobs",
+            batch_number=1,
+            heat="high",
+            period="club_night",
+        )
+
+        self.assertEqual(decision.offer.content_id, "mia_bar_001")
+        self.assertEqual(decision.offer.media_type, "photo")
+
+    async def test_current_location_breaks_tie_between_saved_exact_items(self):
+        catalog = load_media_catalog(CATALOG_PATH)
+        base = catalog.require("mia_home_pose_001")
+        past = MediaPresentation(
+            mode="past_only",
+            periods=(),
+            current_description=None,
+            past_description="a saved playful full-body photo",
+        )
+        club = dataclasses.replace(
+            base,
+            id="aaa_club_saved",
+            presentation=past,
+            tags={**base.tags, "location": ("club",)},
+        )
+        home = dataclasses.replace(
+            base,
+            id="zzz_home_saved",
+            presentation=past,
+            tags={**base.tags, "location": ("home",)},
+        )
+        service = MediaCommerceService(
+            MediaCatalog((club, home)),
+            repository=FakeRepository(),
+            random_source=random.Random(7),
+        )
+
+        decision = await service.plan_commerce_turn(
+            1,
+            "send me a photo",
+            batch_number=1,
+            heat="low",
+            period="morning_home",
+        )
+
+        self.assertEqual(decision.offer.content_id, "zzz_home_saved")
+        self.assertEqual(decision.action, CommerceAction.OFFER_SAVED)
 
     async def test_explicit_requested_location_beats_current_location(self):
         decision = await self.service.plan_commerce_turn(
@@ -495,7 +708,9 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
             period="morning_home",
         )
         self.assertEqual(decision.offer.content_id, "mia_bar_001")
-        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+        self.assertEqual(decision.action, CommerceAction.OFFER_SAVED)
+        self.assertEqual(decision.current_context, "")
+        self.assertNotIn("current context", decision.brief.lower())
 
     async def test_requested_body_from_other_location_beats_wrong_current_body(self):
         decision = await self.service.plan_commerce_turn(
@@ -508,17 +723,17 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.offer.content_id, "mia_bar_001")
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
 
-    async def test_unlocked_current_item_is_excluded_and_fallback_is_contextual(self):
+    async def test_unlocked_current_item_is_excluded_and_exact_saved_item_needs_no_excuse(self):
         self.repository.unlocked.add("mia_bar_001")
         decision = await self.service.plan_commerce_turn(
             1, "send a photo", batch_number=1, heat="rising", period="bar_shift"
         )
         self.assertEqual(decision.offer.content_id, "mia_home_pose_001")
-        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
-        self.assertIn("Current context:", decision.brief)
+        self.assertEqual(decision.action, CommerceAction.OFFER_SAVED)
+        self.assertIn("saved", decision.brief.lower())
         self.assertEqual(decision.item_locations, ("home", "bedroom"))
         self.assertEqual(decision.current_locations, ("bar", "stockroom"))
-        self.assertTrue(decision.current_context)
+        self.assertEqual(decision.current_context, "")
 
     async def test_fallback_explains_both_location_and_requested_type_mismatch(self):
         self.repository.unlocked.add("mia_club_clip_001")
@@ -527,8 +742,8 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(decision.offer.media_type, "photo")
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
-        self.assertIn("does not have a video", decision.brief)
-        self.assertIn("photo is the closest alternative", decision.brief)
+        self.assertIn("I do not have that as a video", decision.brief)
+        self.assertIn("exactly that as a photo", decision.brief)
 
     async def test_generic_request_starts_photo_then_alternates_video(self):
         first = await self.service.plan_commerce_turn(

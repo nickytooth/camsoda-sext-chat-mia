@@ -292,10 +292,13 @@ User sends a text message (WebSocket)
 
 ```text
 Processed user batch
-  -> deterministic media-intent aliases/tags
+  -> deterministic media-intent aliases/tags + same-batch refinements
+  -> explicit fresh/live capture intent tracked separately from delivery urgency
   -> direct/contextual request: set Heat high and plan an immediate offer
   -> proactive request: batch/heat/snooze checks
-  -> catalog planner (current location first, unlocked excluded)
+  -> semantic-first catalog planner (requested type, alternate type, then nearest)
+  -> exact current, exact saved, or explained fallback presentation
+     (unlocked excluded; current location is normally a tie-breaker)
   -> one reserved database offer, or a trusted text-only unavailable action
   -> safe COMMERCE BRIEF for Mia (no key, URL, catalog or price)
   -> persisted teaser text + delivered offer
@@ -309,6 +312,10 @@ increments `engagement_state.total_messages` once, even if it contains hundreds
 of rapidly sent messages. A valid direct or contextual visual request raises
 durable Heat to `high` for the current turn and can immediately select eligible
 inventory; proactive requests continue to respect the pacing rules.
+An exact saved item is offered without a capture excuse unless the user
+explicitly asked for a fresh/live visual. Type and semantic fallbacks explain
+only the real inventory difference, and live blockers never invent a person
+who is absent from Mia's current schedule.
 
 ### Memory System
 
