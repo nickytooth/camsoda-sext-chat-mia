@@ -93,6 +93,7 @@ ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS sales_reask_pending BOOLEA
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS sales_reask_asked_at_batch BIGINT;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_proactive_media_batch BIGINT;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_generic_media_type TEXT;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_media_unlock_batch BIGINT;
 -- Conversation heat is a durable state machine.  It advances once per
 -- processed debounce batch (never once per raw message) and survives
 -- summarisation, reconnects and process restarts.
@@ -181,9 +182,8 @@ CREATE TABLE IF NOT EXISTS media_tag_affinity (
     updated_at DOUBLE PRECISION NOT NULL,
     PRIMARY KEY (user_id, tag_group, tag_value)
 );
--- Ephemeral but durable direct-request confirmation.  The LLM never owns this
--- state: it receives only a trusted action after the backend has validated and
--- normalized the requested media facets.
+-- Legacy direct-request confirmation storage. Kept non-destructively for
+-- existing deployments; the immediate-offer runtime no longer reads or writes it.
 CREATE TABLE IF NOT EXISTS media_request_confirmations (
     user_id BIGINT PRIMARY KEY,
     status TEXT NOT NULL CHECK (status IN ('pending', 'granted')),

@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import random
-import time
 from dataclasses import dataclass
 from enum import Enum
+from typing import Sequence
 
 from bot import config
+from bot.media_copy import (
+    spoken_fallback_context as _spoken_fallback_context,
+    spoken_item_description as _spoken_item_description,
+)
 from bot.media_catalog import MediaCatalog, MediaItem, load_media_catalog
 from bot.media_planner import (
     CatalogPlanner,
     MediaIntent,
     classify_media_intent,
+    classify_media_intent_batch,
     last_relevant_locked_offer,
 )
 from bot.media_repository import (
@@ -35,11 +40,10 @@ from bot.time_context import get_media_locations
 
 class CommerceAction(str, Enum):
     OFFER_CURRENT = "offer_current"
+    OFFER_SAVED = "offer_saved"
     OFFER_FALLBACK = "offer_fallback"
     REACT_TO_DECLINE = "react_to_decline"
     ASK_PERMISSION_AGAIN = "ask_permission_again"
-    ASK_MEDIA_CONFIRMATION = "ask_media_confirmation"
-    CANCEL_MEDIA_CONFIRMATION = "cancel_media_confirmation"
     MEDIA_REQUEST_UNAVAILABLE = "media_request_unavailable"
     ACKNOWLEDGE_UNLOCK = "acknowledge_unlock"
     NONE = "none"
@@ -77,10 +81,6 @@ class CommerceDecision:
     user_id: int | None = None
     batch_number: int | None = None
     decline_kind: str | None = None
-    # A normalized direct request is staged only after the confirmation
-    # question itself has been persisted. It is internal backend state and is
-    # excluded from the allowlisted prompt block.
-    pending_intent: MediaIntent | None = None
     # Canonical catalog/current locations stay inside the backend trust
     # boundary. They are used by the deterministic output guard and are never
     # serialized into the chat payload or exposed to the browser.
@@ -112,6 +112,8 @@ def _price_for(item: MediaItem) -> int:
 class MediaCommerceService:
     """Coordinates pacing, deterministic selection, wallet and entitlement state."""
 
+    MEDIA_CONTEXT_WINDOW_BATCHES = 8
+
     def __init__(
         self,
         catalog: MediaCatalog,
@@ -125,53 +127,6 @@ class MediaCommerceService:
         self.token_service = token_service or DemoTokenService(self.repository)
         self.planner = CatalogPlanner(catalog, self.repository)
         self._random = random_source or random.SystemRandom()
-
-    @staticmethod
-    def _confirmation_intent(record: object) -> MediaIntent:
-        return MediaIntent(
-            requested=True,
-            requested_type=getattr(record, "requested_type", None),
-            tags=getattr(record, "tags", {}) or {},
-            explicitness=getattr(record, "explicitness", None),
-        )
-
-    @staticmethod
-    def _merge_confirmed_intent(
-        stored: MediaIntent, current: MediaIntent
-    ) -> MediaIntent:
-        """Let a repeated command refine the request that Mia confirmed."""
-
-        tags = dict(stored.tags)
-        tags.update(current.tags)
-        return MediaIntent(
-            requested=True,
-            requested_type=current.requested_type or stored.requested_type,
-            tags=tags,
-            explicitness=current.explicitness or stored.explicitness,
-            affirmative=True,
-        )
-
-    @staticmethod
-    def _confirmed_selection_heat(intent: MediaIntent, heat: str) -> str:
-        """Narrowly unlock high-only inventory for an explicit confirmed ask.
-
-        A generic low-heat "picture?" must not silently become a nude offer.
-        The override applies only when the normalized request itself names a
-        nude/explicit level or an unambiguously explicit controlled facet. It
-        affects catalog selection only and never advances conversational Heat.
-        """
-
-        explicit_activities = {"masturbating", "oral", "vaginal", "anal", "toy_play"}
-        body_focus = set(intent.tags.get("body_focus", ()))
-        outfits = set(intent.tags.get("outfit", ()))
-        activities = set(intent.tags.get("activity", ()))
-        explicitly_high = (
-            intent.explicitness in {"nude", "explicit"}
-            or bool(body_focus.intersection({"boobs", "pussy"}))
-            or bool(outfits.intersection({"topless", "nude"}))
-            or bool(activities.intersection(explicit_activities))
-        )
-        return "high" if explicitly_high else heat
 
     def _safe_offer(
         self,
@@ -219,7 +174,7 @@ class MediaCommerceService:
             state=state,
         )
         if planned is None:
-            if trigger in {"direct", "confirmed_direct", "permission_reask"}:
+            if trigger in {"direct", "permission_reask"}:
                 requested = intent.requested_type or "visual content"
                 return CommerceDecision(
                     action=CommerceAction.MEDIA_REQUEST_UNAVAILABLE,
@@ -248,9 +203,9 @@ class MediaCommerceService:
         except MediaUnavailableError:
             # A concurrent planner or unlock won the per-user reservation race.
             # Failing closed is safer than attaching a duplicate/resold card,
-            # but a confirmed request must not lose all trusted commerce
+            # but a direct request must not lose all trusted commerce
             # context and leave the model free to invent inventory.
-            if trigger in {"direct", "confirmed_direct", "permission_reask"}:
+            if trigger in {"direct", "permission_reask"}:
                 return CommerceDecision(
                     action=CommerceAction.MEDIA_REQUEST_UNAVAILABLE,
                     brief=(
@@ -262,15 +217,29 @@ class MediaCommerceService:
                     batch_number=batch_number,
                 )
             return CommerceDecision()
+        spoken_item_description = _spoken_item_description(planned.description)
         current_context = ""
         if planned.action == CommerceAction.OFFER_CURRENT.value:
-            brief = f"Offer this real {planned.item.media_type}: {planned.description}."
+            brief = (
+                f"Offer this real current {planned.item.media_type}: "
+                f"{spoken_item_description}."
+            )
+        elif planned.action == CommerceAction.OFFER_SAVED.value:
+            brief = (
+                f"Offer this real saved {planned.item.media_type} as something I kept "
+                f"for a special moment: {spoken_item_description}. Do not give a current-"
+                "capture excuse."
+            )
         else:
-            reason = planned.fallback_reason or "There is no unopened exact-current match."
+            reason = _spoken_fallback_context(
+                planned.fallback_reason
+                or "The exact requested match is unavailable."
+            )
             current_context = reason
             brief = (
-                f"Current context: {reason}. Offer this real alternative as an older or "
-                f"different-location {planned.item.media_type}: {planned.description}."
+                f"Fallback reason: {reason}. Offer this real backend-selected alternative "
+                f"{planned.item.media_type}: {spoken_item_description}. State only that "
+                "precise mismatch reason and do not invent an excuse."
             )
         offer = MediaOffer(
             offer_id=record.offer_id,
@@ -290,7 +259,7 @@ class MediaCommerceService:
             brief=brief,
             offer=offer,
             current_context=current_context,
-            offered_item_description=planned.description,
+            offered_item_description=spoken_item_description,
             user_id=user_id,
             batch_number=batch_number,
             item_locations=tuple(planned.item.tags.get("location", ())),
@@ -343,6 +312,7 @@ class MediaCommerceService:
         text: str,
         *,
         batch_number: int,
+        intent: MediaIntent | None = None,
     ) -> bool:
         """Whether this turn is deterministically a visual-commerce refusal.
 
@@ -351,14 +321,10 @@ class MediaCommerceService:
         self-contained; bare negatives require a recent locked offer or a
         pending permission check, matching ``plan_commerce_turn`` exactly.
         """
-        intent = classify_media_intent(text)
+        intent = intent or classify_media_intent(text)
         if not intent.decline_kind:
             return False
         if intent.decline_global:
-            return True
-
-        confirmation = await self.repository.get_media_confirmation(user_id)
-        if confirmation is not None and confirmation.status == "pending":
             return True
 
         state = await self.repository.get_engagement_state(user_id)
@@ -376,6 +342,69 @@ class MediaCommerceService:
             batch_number=batch_number,
         ) is not None
 
+    async def classify_media_turn(
+        self,
+        user_id: int,
+        raw_messages: Sequence[str],
+        *,
+        batch_number: int,
+    ) -> MediaIntent:
+        """Classify one ordered batch against durable, bounded media context.
+
+        The classifier itself is pure and deterministic. Repository state only
+        authorizes otherwise-ambiguous follow-ups (``another one``/``more``)
+        for eight processed batches after a real delivered offer or unlock.
+        A bare affirmative is promoted only for the immediate backend-owned
+        permission re-ask, never merely because an older card exists.
+        """
+
+        state = await self.repository.get_engagement_state(user_id)
+        history = await self.repository.delivered_offer_history(user_id)
+        recent_offer = any(
+            0 <= batch_number - int(offer.batch_number)
+            <= self.MEDIA_CONTEXT_WINDOW_BATCHES
+            for offer in history
+        )
+        unlock_raw = state.get("last_media_unlock_batch")
+        try:
+            unlock_batch = int(unlock_raw) if unlock_raw is not None else None
+        except (TypeError, ValueError):
+            unlock_batch = None
+        recent_unlock = bool(
+            unlock_batch is not None
+            and 0 <= batch_number - unlock_batch <= self.MEDIA_CONTEXT_WINDOW_BATCHES
+        )
+        intent = classify_media_intent_batch(
+            raw_messages,
+            recent_media_context=recent_offer or recent_unlock,
+        )
+
+        asked_at_raw = state.get("sales_reask_asked_at_batch")
+        try:
+            asked_at = int(asked_at_raw) if asked_at_raw is not None else None
+        except (TypeError, ValueError):
+            asked_at = None
+        immediate_reask = bool(
+            state.get("sales_reask_pending")
+            and asked_at is not None
+            and batch_number == asked_at + 1
+        )
+        if (
+            immediate_reask
+            and intent.affirmative
+            and not intent.requested
+            and intent.decline_kind is None
+        ):
+            return MediaIntent(
+                requested=True,
+                requested_type=intent.requested_type,
+                tags=intent.tags,
+                explicitness=intent.explicitness,
+                requires_current=intent.requires_current,
+                affirmative=True,
+            )
+        return intent
+
     async def plan_commerce_turn(
         self,
         user_id: int,
@@ -384,84 +413,16 @@ class MediaCommerceService:
         batch_number: int,
         heat: str,
         period: str,
+        intent: MediaIntent | None = None,
     ) -> CommerceDecision:
         """Return at most one trusted action for this processed user batch."""
         await self.repository.cancel_stale_reservations(user_id)
-        intent = classify_media_intent(text)
+        intent = intent or await self.classify_media_turn(
+            user_id,
+            [text],
+            batch_number=batch_number,
+        )
         state = await self.repository.get_engagement_state(user_id)
-
-        now = time.time()
-        confirmation = await self.repository.get_media_confirmation(user_id, now=now)
-        if (
-            confirmation is not None
-            and confirmation.status == "pending"
-            and batch_number - confirmation.asked_at_batch
-            > config.MEDIA_CONFIRMATION_MAX_BATCH_GAP
-        ):
-            await self.repository.clear_media_confirmation(user_id, pending_only=True)
-            confirmation = None
-
-        if confirmation is not None and confirmation.status == "pending":
-            if intent.decline_kind:
-                await self.repository.clear_media_confirmation(
-                    user_id, pending_only=True
-                )
-                # A bare/simple no cancels this one confirmation without
-                # creating the 30--40 batch sales snooze used for declining an
-                # actual paywall offer. Global/hard wording still falls through
-                # to the normal durable sales-pause rules below.
-                if not intent.decline_global:
-                    return CommerceDecision(
-                        action=CommerceAction.CANCEL_MEDIA_CONFIRMATION,
-                        brief=(
-                            "He backed out of the visual request before any media card "
-                            "was offered. Accept it naturally without pressure."
-                        ),
-                        user_id=user_id,
-                        batch_number=batch_number,
-                    )
-                confirmation = None
-            elif intent.affirmative or intent.requested:
-                stored_intent = self._confirmation_intent(confirmation)
-                confirmed_intent = (
-                    self._merge_confirmed_intent(stored_intent, intent)
-                    if intent.requested
-                    else stored_intent
-                )
-                granted = await self.repository.grant_media_confirmation(
-                    user_id,
-                    batch_number=batch_number,
-                    max_batch_gap=config.MEDIA_CONFIRMATION_MAX_BATCH_GAP,
-                    granted_until=now + config.MEDIA_CONFIRMATION_GRANT_SECONDS,
-                    now=now,
-                )
-                if granted is not None:
-                    await self.repository.clear_sales_pause(user_id)
-                    state.update(
-                        sales_snooze_until_batch=None,
-                        sales_reask_pending=False,
-                        sales_reask_asked_at_batch=None,
-                    )
-                    # A confirmed *explicit* ask may select high-minimum
-                    # inventory. Generic asks and all proactive offers still
-                    # obey the real durable Heat stage.
-                    return await self._reserve_planned(
-                        user_id,
-                        confirmed_intent,
-                        batch_number=batch_number,
-                        heat=self._confirmed_selection_heat(
-                            confirmed_intent, heat
-                        ),
-                        period=period,
-                        trigger="confirmed_direct",
-                        state=state,
-                    )
-                confirmation = None
-            else:
-                # Keep the pending request for a small bounded number of
-                # processed turns. An unrelated message is never treated as
-                # permission and cannot accidentally attach a card.
-                return CommerceDecision()
 
         sales_reask_pending = bool(state.get("sales_reask_pending"))
         asked_at_raw = state.get("sales_reask_asked_at_batch")
@@ -478,34 +439,23 @@ class MediaCommerceService:
                 sales_reask_pending=False,
                 sales_reask_asked_at_batch=None,
             )
-            if confirmation is not None and confirmation.status == "granted":
-                # A durable grant carries the normalized explicit scope the
-                # user already confirmed. A later type-only request refines
-                # that scope instead of silently dropping it (for example,
-                # confirmed nude content followed by "send me video").
-                confirmed_intent = self._merge_confirmed_intent(
-                    self._confirmation_intent(confirmation),
-                    intent,
-                )
-                return await self._reserve_planned(
-                    user_id,
-                    confirmed_intent,
-                    batch_number=batch_number,
-                    heat=self._confirmed_selection_heat(confirmed_intent, heat),
-                    period=period,
-                    trigger="confirmed_direct",
-                    state=state,
-                )
-            return CommerceDecision(
-                action=CommerceAction.ASK_MEDIA_CONFIRMATION,
-                brief=(
-                    "He directly asked for visual content. React with surprised, visible "
-                    "excitement and make sure he truly wants to cross that line before "
-                    "anything is offered. No media card is attached yet."
-                ),
-                user_id=user_id,
+            is_permission_reask = bool(
+                sales_reask_pending
+                and asked_at is not None
+                and batch_number == asked_at + 1
+                and intent.affirmative
+            )
+            return await self._reserve_planned(
+                user_id,
+                intent,
                 batch_number=batch_number,
-                pending_intent=intent,
+                # A direct visual request is itself the user's intent to see
+                # content. It makes high-minimum inventory eligible on this
+                # same turn; ChatEngine persists the matching Heat jump.
+                heat="high",
+                period=period,
+                trigger="permission_reask" if is_permission_reask else "direct",
+                state=state,
             )
 
         history = await self.repository.delivered_offer_history(user_id)
@@ -551,13 +501,14 @@ class MediaCommerceService:
                     requested_type=intent.requested_type,
                     tags=intent.tags,
                     explicitness=intent.explicitness,
+                    requires_current=intent.requires_current,
                     affirmative=True,
                 )
                 return await self._reserve_planned(
                     user_id,
                     permission_intent,
                     batch_number=batch_number,
-                    heat=heat,
+                    heat="high",
                     period=period,
                     trigger="permission_reask",
                     state=state,
@@ -636,23 +587,8 @@ class MediaCommerceService:
                 decision.user_id, batch_number=decision.batch_number
             )
             return True
-        if decision.action == CommerceAction.ASK_MEDIA_CONFIRMATION:
-            if decision.pending_intent is None:
-                return False
-            now = time.time()
-            await self.repository.stage_media_confirmation(
-                decision.user_id,
-                requested_type=decision.pending_intent.requested_type,
-                tags=decision.pending_intent.tags,
-                explicitness=decision.pending_intent.explicitness,
-                asked_at_batch=decision.batch_number,
-                expires_at=now + config.MEDIA_CONFIRMATION_TTL_SECONDS,
-                now=now,
-            )
-            return True
         return decision.action in {
             CommerceAction.NONE,
-            CommerceAction.CANCEL_MEDIA_CONFIRMATION,
             CommerceAction.ACKNOWLEDGE_UNLOCK,
         }
 
@@ -660,13 +596,9 @@ class MediaCommerceService:
         """Cancel presentation only; a user's durable refusal is never undone."""
         return decision.action not in {
             CommerceAction.OFFER_CURRENT,
+            CommerceAction.OFFER_SAVED,
             CommerceAction.OFFER_FALLBACK,
         }
-
-    async def clear_media_confirmation(self, user_id: int) -> bool:
-        """Clear pending/session confirmation after Heat pause or chat reset."""
-
-        return await self.repository.clear_media_confirmation(user_id)
 
     async def mark_offer_delivered(self, offer_id: int | str) -> MediaOffer | None:
         pending = await self.repository.get_offer(offer_id)

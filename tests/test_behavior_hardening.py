@@ -234,7 +234,7 @@ class OutputBoundaryTests(unittest.TestCase):
                 self.assertFalse(unauthorized.ok)
                 self.assertIn("unauthorized_media_claim", unauthorized.reasons)
 
-                for action in ("offer_current", "offer_fallback"):
+                for action in ("offer_current", "offer_saved", "offer_fallback"):
                     media_type = (
                         "video"
                         if re.search(r"\b(?:video|clip)\b", text, re.IGNORECASE)
@@ -248,6 +248,71 @@ class OutputBoundaryTests(unittest.TestCase):
                         commerce_explicitness="suggestive",
                     )
                     self.assertTrue(authorized.ok, (text, action, authorized.reasons))
+
+    def test_offer_copy_must_describe_mias_item_in_first_person(self):
+        offer = {
+            "heat": "high",
+            "commerce_action": "offer_saved",
+            "commerce_media_type": "photo",
+            "commerce_explicitness": "suggestive",
+            "commerce_media_locations": ("bedroom",),
+        }
+
+        for text in (
+            "here's a photo she took from her bedroom",
+            "here's Mia's photo from the bedroom",
+            "Mia picked this photo for you",
+            "here's a photo of herself from the bedroom",
+            "here's a photo where she is naked in the bedroom",
+            "you can see her naked in this photo",
+            "this photo shows her naked",
+            "this is her in the photo from the bedroom",
+            "that's her in this photo",
+            "this photo has her posing",
+            "this photo is her naked",
+            "here's a photo with her naked in the bedroom",
+            "this photo is with her posing",
+            "her posing is in this photo",
+        ):
+            with self.subTest(text=text):
+                result = validate_mia_reply(text, **offer)
+                self.assertFalse(result.ok)
+                self.assertIn("media_offer_third_person_voice", result.reasons)
+
+        first_person = validate_mia_reply(
+            "here's a photo I took from my bedroom",
+            **offer,
+        )
+        self.assertTrue(first_person.ok, first_person.reasons)
+
+        unrelated_third_person = validate_mia_reply(
+            "here's my private photo... my friend said she loved it",
+            **offer,
+        )
+        self.assertTrue(
+            unrelated_third_person.ok,
+            unrelated_third_person.reasons,
+        )
+
+        for text in (
+            "here's my photo... I kept it hidden from her",
+            "here's a photo of my friend from her bedroom",
+            "here's my photo; I want to see her reaction",
+            "here's my photo; you can see her tomorrow",
+        ):
+            with self.subTest(text=text):
+                unrelated = validate_mia_reply(text, **offer)
+                self.assertNotIn(
+                    "media_offer_third_person_voice",
+                    unrelated.reasons,
+                )
+
+        retry = correction_prompt(
+            ("media_offer_third_person_voice",),
+            "high",
+        )
+        self.assertIn("I, me, and my", retry)
+        self.assertIn("Never call yourself Mia", retry)
 
     def test_offer_claim_must_match_single_backend_item_and_never_quote_price(self):
         for text in ("here's a nude", "i sent you content"):
@@ -307,23 +372,24 @@ class OutputBoundaryTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("unauthorized_media_claim", result.reasons)
 
-    def test_media_confirmation_allows_only_a_question_not_delivery_claims(self):
+    def test_retired_media_confirmation_action_no_longer_authorizes_media_claims(self):
         question = "are you sure you really want to see a picture of me?"
         unauthorized = validate_mia_reply(question, heat="rising")
         self.assertFalse(unauthorized.ok)
         self.assertIn("unauthorized_media_claim", unauthorized.reasons)
 
-        authorized = validate_mia_reply(
+        retired_action = validate_mia_reply(
             question,
             heat="rising",
             commerce_action="ask_media_confirmation",
         )
-        self.assertTrue(authorized.ok, authorized.reasons)
+        self.assertFalse(retired_action.ok)
+        self.assertIn("unauthorized_media_claim", retired_action.reasons)
 
         for claim in (
             "i have a picture for you",
             "i do have some videos but those are usually just for me",
-            "i can send it right now",
+            "i can send a picture right now",
             "here's a picture for you",
         ):
             with self.subTest(claim=claim):
@@ -335,15 +401,23 @@ class OutputBoundaryTests(unittest.TestCase):
                 self.assertFalse(result.ok)
                 self.assertIn("unauthorized_media_claim", result.reasons)
 
-        missing_challenge = validate_mia_reply(
+        ordinary_text = validate_mia_reply(
             "i'll think about it",
             heat="rising",
             commerce_action="ask_media_confirmation",
         )
-        self.assertFalse(missing_challenge.ok)
-        self.assertIn(
-            "media_confirmation_missing_challenge", missing_challenge.reasons
+        self.assertTrue(ordinary_text.ok, ordinary_text.reasons)
+
+    def test_immediate_offer_allows_rhetorical_tease_with_the_real_card_claim(self):
+        result = validate_mia_reply(
+            "ohhh, you really wanna cross that line? here's a photo i picked for you",
+            heat="high",
+            commerce_action="offer_current",
+            commerce_media_type="photo",
+            commerce_explicitness="suggestive",
         )
+
+        self.assertTrue(result.ok, result.reasons)
 
     def test_unavailable_media_action_rejects_promises_and_behavior_tests(self):
         for text, reason in (

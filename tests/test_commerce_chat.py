@@ -41,6 +41,9 @@ def offer_payload(offer_id=41):
         "duration_seconds": None,
         "explicitness": "suggestive",
         "description": "behind the bar during her shift",
+        # Kept inside the trusted planner decision. It controls immediate
+        # offer pacing but is intentionally absent from the browser payload.
+        "trigger": "direct",
         # These fields must never cross the chat boundary.
         "full_key": "premium/mia_bar_001.jpg",
         "preview_key": "previews/mia_bar_001.webp",
@@ -155,6 +158,43 @@ class CommerceAdapterTests(unittest.IsolatedAsyncioTestCase):
         correction = fallback.generate.await_args.args[0][0]["content"]
         self.assertIn("setting from the trusted commerce brief", correction)
 
+    async def test_generation_retries_third_person_offer_copy_as_first_person(self):
+        primary = StubProvider()
+        primary.generate = AsyncMock(
+            return_value="here's a photo she took from her bed"
+        )
+        fallback = StubProvider()
+        fallback.generate = AsyncMock(
+            return_value="here's a photo I took from my bed"
+        )
+        persona = Persona({"general": {"name": "Mia", "age": 26}})
+        engine = ChatEngine(
+            persona=persona,
+            nsfw_persona=persona,
+            nsfw_provider=primary,
+            classifier_provider=fallback,
+            fallback_provider=fallback,
+        )
+
+        result = await engine._generate_with_fallback(
+            primary,
+            [
+                {"role": "system", "content": "stay in character"},
+                {"role": "user", "content": "show me the photo"},
+            ],
+            heat="high",
+            commerce_action="offer_saved",
+            commerce_media_type="photo",
+            commerce_explicitness="suggestive",
+            commerce_media_description="a photo I took from my bed",
+            commerce_media_locations=("bedroom",),
+        )
+
+        self.assertEqual(result, "here's a photo I took from my bed")
+        fallback.generate.assert_awaited_once()
+        correction = fallback.generate.await_args.args[0][0]["content"]
+        self.assertIn("I, me, and my", correction)
+
     def test_batch_number_uses_processed_turns_not_raw_message_lifetime(self):
         self.assertEqual(
             ChatEngine._next_batch_number(
@@ -234,6 +274,7 @@ class CommerceAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("full_key", turn.media_offer)
         self.assertNotIn("preview_key", turn.media_offer)
         self.assertNotIn("access_url", turn.media_offer)
+        self.assertNotIn("trigger", turn.media_offer)
 
     async def test_adapter_accepts_the_production_decision_dataclasses(self):
         service = type("Service", (), {})()
@@ -274,12 +315,45 @@ class CommerceAdapterTests(unittest.IsolatedAsyncioTestCase):
             turn.media_offer["content_id"], "fixture_bedroom_photo_001"
         )
 
+    async def test_adapter_accepts_saved_offer_without_expanding_public_payload(self):
+        saved = offer_payload(43)
+        saved.update(
+            content_id="fixture_saved_photo_001",
+            description="a private photo from her bed",
+            action="offer_saved",
+        )
+        service = type("Service", (), {})()
+        service.plan_commerce_turn = AsyncMock(
+            return_value={
+                "action": "offer_saved",
+                "offered_item_description": "a private photo from my bed",
+                "offer": saved,
+            }
+        )
+        engine = make_engine(service)
+
+        turn = await engine._plan_commerce_turn(
+            9,
+            "show me a photo",
+            batch_number=8,
+            heat="high",
+            period="evening_pregame",
+        )
+
+        self.assertEqual(turn.action, "offer_saved")
+        self.assertEqual(turn.media_offer["offer_id"], 43)
+        self.assertEqual(
+            turn.media_offer["description"], "a private photo from her bed"
+        )
+        self.assertNotIn("action", turn.media_offer)
+        self.assertNotIn("trigger", turn.media_offer)
+
     async def test_non_offer_actions_never_attach_a_card(self):
         for action in (
             "react_to_decline",
-            "ask_media_confirmation",
-            "cancel_media_confirmation",
+            "ask_permission_again",
             "media_request_unavailable",
+            "acknowledge_unlock",
         ):
             with self.subTest(action=action):
                 service = type("Service", (), {})()
@@ -301,6 +375,30 @@ class CommerceAdapterTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 self.assertEqual(turn.action, action)
+                self.assertIsNone(turn.media_offer)
+
+    async def test_retired_confirmation_actions_fail_closed(self):
+        for action in ("ask_media_confirmation", "cancel_media_confirmation"):
+            with self.subTest(action=action):
+                service = type("Service", (), {})()
+                service.plan_commerce_turn = AsyncMock(
+                    return_value={
+                        "action": action,
+                        "brief": "obsolete confirmation action",
+                        "offer": offer_payload(),
+                    }
+                )
+                engine = make_engine(service)
+
+                turn = await engine._plan_commerce_turn(
+                    9,
+                    "show me a photo",
+                    batch_number=9,
+                    heat="high",
+                    period="bar_shift",
+                )
+
+                self.assertEqual(turn.action, "none")
                 self.assertIsNone(turn.media_offer)
 
     async def test_offer_fails_closed_if_price_or_safe_metadata_is_invalid(self):
@@ -480,9 +578,15 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
             patch("bot.chat_engine.replace_assistant_message", new=replace),
         )
 
-    async def test_offer_is_finalized_only_after_visible_teaser_is_persisted(self):
+    async def test_direct_current_offer_is_one_bubble_with_card_after_persistence(self):
         with ExitStack() as stack:
-            for turn_patch in self._patch_turn_dependencies():
+            for turn_patch in self._patch_turn_dependencies(
+                generated=(
+                    "ohhh, you really wanna cross that line?\n"
+                    "you've got me tempted now\n"
+                    "here's a photo i picked for you"
+                )
+            ):
                 stack.enter_context(turn_patch)
             response = await self.engine._process_sexting(
                 23, "show me a sexy photo"
@@ -498,6 +602,137 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(persist_index, finalize_index)
         self.assertEqual(response.commerce_action, "offer_current")
         self.assertEqual(response.media_offer["offer_id"], 41)
+        self.assertNotIn("trigger", response.media_offer)
+        self.assertEqual(len(response.messages), 1)
+        self.assertIn("cross that line", response.messages[0])
+        self.assertIn("here's a photo", response.messages[0])
+
+    async def test_direct_saved_offer_is_one_bubble_with_card(self):
+        saved_offer = offer_payload(43)
+        saved_offer.update(
+            content_id="mia_saved_bedroom_001",
+            description="a private photo from her bed",
+        )
+
+        async def plan_saved(user_id, text, *, batch_number, heat, period):
+            self.events.append(("plan", batch_number, period))
+            return {
+                "action": "offer_saved",
+                "brief": "offer the exact saved photo without a current excuse",
+                "current_context": "",
+                "offered_item_description": "a private photo from my bed",
+                "offer": saved_offer,
+            }
+
+        async def finalize_saved(offer_id):
+            self.events.append(("finalize", offer_id))
+            return saved_offer
+
+        self.service.plan_commerce_turn = plan_saved
+        self.service.mark_offer_delivered = finalize_saved
+        with ExitStack() as stack:
+            for turn_patch in self._patch_turn_dependencies(
+                generated=(
+                    "ohhh, you really wanna see it?\n"
+                    "i kept this private photo from my bed for a special moment"
+                )
+            ):
+                stack.enter_context(turn_patch)
+            response = await self.engine._process_sexting(
+                23, "show me a sexy photo"
+            )
+
+        self.assertEqual(response.commerce_action, "offer_saved")
+        self.assertEqual(response.media_offer["offer_id"], 43)
+        self.assertEqual(len(response.messages), 1)
+        visible = response.messages[0]
+        self.assertIn("kept this private photo", visible)
+        self.assertNotIn("Tyler", visible)
+        self.assertNotIn("can't take", visible)
+
+    async def test_proactive_saved_offer_is_also_one_bubble_with_card(self):
+        saved_offer = offer_payload(44)
+        saved_offer.update(
+            content_id="mia_saved_bedroom_001",
+            description="a private photo from her bed",
+            trigger="proactive",
+        )
+
+        async def plan_saved(user_id, text, *, batch_number, heat, period):
+            self.events.append(("plan", batch_number, period))
+            return {
+                "action": "offer_saved",
+                "brief": "offer the saved photo confidently",
+                "current_context": "",
+                "offered_item_description": "a private photo from my bed",
+                "offer": saved_offer,
+            }
+
+        async def finalize_saved(offer_id):
+            self.events.append(("finalize", offer_id))
+            return saved_offer
+
+        self.service.plan_commerce_turn = plan_saved
+        self.service.mark_offer_delivered = finalize_saved
+        with ExitStack() as stack:
+            for turn_patch in self._patch_turn_dependencies(
+                generated=(
+                    "i've been thinking about you\n"
+                    "so i kept this private photo from my bed\n"
+                    "maybe tonight is the special moment"
+                )
+            ):
+                stack.enter_context(turn_patch)
+            response = await self.engine._process_sexting(23, "i missed you")
+
+        self.assertEqual(response.commerce_action, "offer_saved")
+        self.assertEqual(response.media_offer["offer_id"], 44)
+        self.assertEqual(len(response.messages), 1)
+        self.assertIn("private photo from my bed", response.messages[0])
+
+    async def test_direct_fallback_offer_is_two_bubbles_with_card(self):
+        fallback_offer = offer_payload(42)
+        fallback_offer.update(
+            content_id="mia_bathroom_001",
+            description="a private photo from her bathroom",
+        )
+
+        async def plan_fallback(user_id, text, *, batch_number, heat, period):
+            self.events.append(("plan", batch_number, period))
+            return {
+                "action": "offer_fallback",
+                "brief": "customers are around; offer the real bathroom alternative",
+                "current_context": "customers are around at the bar",
+                "offered_item_description": fallback_offer["description"],
+                "offer": fallback_offer,
+            }
+
+        async def finalize_fallback(offer_id):
+            self.events.append(("finalize", offer_id))
+            return fallback_offer
+
+        self.service.plan_commerce_turn = plan_fallback
+        self.service.mark_offer_delivered = finalize_fallback
+        with ExitStack() as stack:
+            for turn_patch in self._patch_turn_dependencies(
+                generated=(
+                    "ohhh, you really wanna go there?\n"
+                    "here's an old one i picked for you"
+                )
+            ):
+                stack.enter_context(turn_patch)
+            response = await self.engine._process_sexting(
+                23, "show me a sexy photo"
+            )
+
+        self.assertEqual(response.commerce_action, "offer_fallback")
+        self.assertIsNotNone(response.media_offer)
+        self.assertEqual(response.media_offer["offer_id"], 42)
+        self.assertNotIn("trigger", response.media_offer)
+        self.assertEqual(len(response.messages), 2)
+        visible = "\n".join(response.messages)
+        self.assertIn("customers are around at the bar", visible)
+        self.assertIn("private photo from my bathroom", visible)
 
     async def test_permission_reask_is_committed_only_after_question_is_persisted(self):
         async def plan_reask(user_id, text, *, batch_number, heat, period):
@@ -526,35 +761,6 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(persist_index, finalize_index)
         self.assertEqual(response.commerce_action, "ask_permission_again")
-        self.assertIsNone(response.media_offer)
-
-    async def test_direct_confirmation_is_committed_after_text_and_has_no_card(self):
-        async def plan_confirmation(user_id, text, *, batch_number, heat, period):
-            self.events.append(("plan", batch_number, period))
-            return {
-                "action": "ask_media_confirmation",
-                "brief": "ask him whether he is sure",
-                "offer": None,
-            }
-
-        self.service.plan_commerce_turn = plan_confirmation
-        with ExitStack() as stack:
-            for turn_patch in self._patch_turn_dependencies(
-                generated="oh wow... you really want to cross that line?"
-            ):
-                stack.enter_context(turn_patch)
-            response = await self.engine._process_sexting(23, "send nude now")
-
-        persist_index = next(
-            index for index, event in enumerate(self.events) if event[0] == "persist"
-        )
-        finalize_index = next(
-            index
-            for index, event in enumerate(self.events)
-            if event[0] == "finalize_action"
-        )
-        self.assertLess(persist_index, finalize_index)
-        self.assertEqual(response.commerce_action, "ask_media_confirmation")
         self.assertIsNone(response.media_offer)
 
     async def test_failed_reask_state_is_replaced_before_delivery(self):

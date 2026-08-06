@@ -3,6 +3,10 @@ import re
 from collections.abc import Mapping
 
 from bot.persona import Persona
+from bot.media_copy import (
+    spoken_fallback_context as _spoken_commerce_context,
+    spoken_item_description as _spoken_commerce_description,
+)
 from bot.meta_guard import neutralize_meta_control_messages
 from bot.time_context import get_time_prompt
 from bot.mood import format_mood_for_prompt
@@ -143,7 +147,8 @@ _GLOBAL_GUARDRAILS = (
     "without interrogating him; let him choose whether to continue the topic.\n"
     "- VISUAL MEDIA IS BACKEND-CONTROLLED. You may say that you are offering a photo or "
     "video ONLY when this prompt contains a trusted COMMERCE BRIEF whose action is "
-    "offer_current or offer_fallback. That action is accompanied by a real media card. "
+    "offer_current, offer_saved, or offer_fallback. That action is accompanied by a real "
+    "media card. "
     "Without one of those actions, never claim you sent, attached, posted, or are currently "
     "selling a file. Never invent a photo/video, price, discount, token balance, content ID, "
     "link, URL, bucket, upload, purchase result, or unlock result. Never tell him to check a "
@@ -154,15 +159,21 @@ _GLOBAL_GUARDRAILS = (
 _COMMERCE_ACTIONS = frozenset(
     {
         "offer_current",
+        "offer_saved",
         "offer_fallback",
         "react_to_decline",
         "ask_permission_again",
-        "ask_media_confirmation",
-        "cancel_media_confirmation",
         "media_request_unavailable",
         "acknowledge_unlock",
         "none",
     }
+)
+
+_COMMERCE_OFFER_TRIGGERS = frozenset(
+    {"direct", "permission_reask", "proactive"}
+)
+_IMMEDIATE_OFFER_TRIGGERS = frozenset(
+    {"direct", "permission_reask"}
 )
 
 _URL_OR_STORAGE_REFERENCE = re.compile(
@@ -204,6 +215,23 @@ def _safe_commerce_copy(value: object, *, limit: int = 600) -> str:
     return text
 
 
+def _commerce_offer_trigger(brief: object) -> str:
+    """Read only the allowlisted trigger from the structured selected offer.
+
+    The free-form curated brief must never be able to turn a proactive offer
+    into a direct-request response.  Production decisions put the trigger on
+    the safe ``offer`` object; unknown or malformed values fail back to the
+    existing generic offer instructions.
+    """
+    offer = _commerce_value(brief, "offer")
+    if offer is None:
+        return ""
+    value = _commerce_value(offer, "trigger", "")
+    value = getattr(value, "value", value)
+    trigger = str(value)
+    return trigger if trigger in _COMMERCE_OFFER_TRIGGERS else ""
+
+
 def _trusted_commerce_block(brief: object | None) -> str | None:
     """Render the single server-authorised commerce action for this reply.
 
@@ -223,17 +251,83 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
         _commerce_value(brief, "current_context", "")
     )
 
+    offer_trigger = _commerce_offer_trigger(brief)
+    immediate_offer = offer_trigger in _IMMEDIATE_OFFER_TRIGGERS
+    if action in {"offer_current", "offer_saved", "offer_fallback"}:
+        # Production already supplies first-person copy. This second trust
+        # boundary protects lightweight adapters and legacy mapping callers so
+        # raw catalog voice can never reach the model.
+        copy = _spoken_commerce_description(copy)
+        item_description = _spoken_commerce_description(item_description)
+        current_context = _spoken_commerce_context(current_context)
+
+    offer_current_instructions = (
+        (
+            "A real locked media card WILL be attached immediately after this text. This is "
+            "an accepted immediate response to his direct or contextual visual request. "
+            "Write exactly ONE short text bubble: react with genuine surprise and visible "
+            "temptation, then use a brief rhetorical tease in the spirit of 'ohhh, you "
+            "really wanna cross that line?' and naturally introduce the exact selected item. "
+            "The tease is flavor, NOT a confirmation step: do not ask for permission, do not "
+            "wait for another answer, and do not imply the card will arrive later. Do not say "
+            "it is already unlocked or paid for."
+        )
+        if immediate_offer
+        else (
+            "A real locked media card WILL be attached to this reply. Write exactly ONE "
+            "short text bubble that introduces it as a natural, teasing offer fitting what "
+            "he asked for. The curated copy may be presented as current. Do not say it is "
+            "already unlocked or paid for."
+        )
+    )
+    offer_saved_instructions = (
+        (
+            "A real locked saved media card WILL be attached immediately after this text. "
+            "This exactly matches what he asked to see, but it is a saved item rather than "
+            "a fresh capture. Write exactly ONE short text bubble: react with genuine "
+            "temptation, then introduce it confidently as something you kept for a special "
+            "moment. Do not give an excuse, discuss your current surroundings, imply a live "
+            "mismatch, or pretend you captured it right now. The card arrives with this "
+            "reply, so do not ask for permission or imply it will arrive later. Do not say "
+            "it is already unlocked or paid for."
+        )
+        if immediate_offer
+        else (
+            "A real locked saved media card WILL be attached to this reply. Introduce it "
+            "confidently in exactly ONE short text bubble as something you kept for a special "
+            "moment. Do not give a current-capture excuse, discuss a mismatch, or pretend it "
+            "was captured right now. Do not say it is already unlocked or paid for."
+        )
+    )
+    offer_fallback_instructions = (
+        (
+            "A real locked alternative media card WILL be attached immediately after this "
+            "text. This is an accepted immediate response to his direct or contextual visual "
+            "request. Write exactly TWO short text bubbles. Bubble 1 reacts with genuine "
+            "surprise and visible temptation and uses one brief rhetorical tease in the "
+            "spirit of 'ohhh, you really wanna cross that line?' The tease is flavor, NOT a "
+            "confirmation step: do not ask for permission and do not wait for another answer. "
+            "Bubble 2 states the precise mismatch reason from current_context, then pivots "
+            "to and introduces the exact selected alternative in offered_item_description. "
+            "The reason may be a live-capture blocker, a requested media-type mismatch, or a "
+            "semantic mismatch. Use only the supplied reason: never invent Tyler, a friend, "
+            "customers, coworkers, or any other person. Do not pretend the alternative was "
+            "captured right now, and do not imply the card will arrive later."
+        )
+        if immediate_offer
+        else (
+            "A real locked alternative media card WILL be attached. Write exactly TWO short "
+            "text bubbles. In bubble 2, state the precise mismatch reason from current_context "
+            "and pivot naturally to the selected alternative. Use only that supplied reason; "
+            "never invent a person or a generic current-capture excuse. Do not pretend the "
+            "alternative was captured right now."
+        )
+    )
+
     instructions = {
-        "offer_current": (
-            "A real locked media card WILL be attached to this reply. Introduce it as a "
-            "natural, teasing offer that fits what he asked for. The curated copy may be "
-            "presented as current. Do not say it is already unlocked or paid for."
-        ),
-        "offer_fallback": (
-            "A real locked alternative media card WILL be attached. Briefly explain the "
-            "current situation in character, then pivot naturally to the curated older or "
-            "different-location item. Do not pretend the alternative was captured right now."
-        ),
+        "offer_current": offer_current_instructions,
+        "offer_saved": offer_saved_instructions,
+        "offer_fallback": offer_fallback_instructions,
         "react_to_decline": (
             "No media card is attached. Accept his no immediately. React only once with mild "
             "surprise, disappointment, or a slightly sad note in character; do not argue, "
@@ -243,20 +337,6 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
             "No media card is attached. Softly ask whether he wants to see you now. Do not "
             "claim anything was sent and do not announce a price. A card may be offered only "
             "after he answers positively on a later turn."
-        ),
-        "ask_media_confirmation": (
-            "No media card is attached. This is his first direct visual request in the "
-            "current session. React with genuine surprise and clearly visible temptation, "
-            "then give him one short, indirect are-you-sure challenge in the spirit of "
-            "'you really want to cross that line?' Vary the wording naturally. Do not claim "
-            "you have, took, chose, sent, or attached a file; do not use work, privacy, or "
-            "other people as a technical refusal. Mention Tyler only if the live conversation "
-            "makes that tension genuinely relevant."
-        ),
-        "cancel_media_confirmation": (
-            "No media card is attached. He backed out before an offer was made. Accept it "
-            "briefly and naturally without disappointment tactics, pressure, a renewed sales "
-            "question, or any claim that a file exists."
         ),
         "media_request_unavailable": (
             "No media card is attached because the deterministic backend could not reserve "
@@ -270,12 +350,12 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
         ),
     }[action]
 
-    if action in {"offer_current", "offer_fallback"} and item_description:
+    if action in {"offer_current", "offer_saved", "offer_fallback"} and item_description:
         payload = {
             "action": action,
             "offered_item_description": item_description,
         }
-        if current_context:
+        if action == "offer_fallback" and current_context:
             payload["current_context"] = current_context
     else:
         # Legacy mapping callers and non-offer actions still use the single
@@ -288,9 +368,11 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
         "general no-media-claim default, but only to the exact extent stated below.\n"
         f"ACTION_DATA_JSON: {json.dumps(payload, ensure_ascii=False)}\n"
         f"REPLY BEHAVIOR: {instructions}\n"
-        "For an offer, offered_item_description is the authoritative factual metadata for "
-        "the one real item; current_context only explains Mia's situation right now and "
-        "never describes the file's origin. Preserve the item's media type, explicitness, "
+        "For an offer, offered_item_description is the authoritative first-person factual "
+        "metadata for the one real item; current_context contains only the precise reason "
+        "for a fallback and never describes the file's origin. Describe your own item only "
+        "with I/me/my; never call yourself Mia or use she/her. Preserve the item's media "
+        "type, explicitness, "
         "capture timing, and setting. Never substitute a different room or location; if "
         "you mention where the item came from, use only offered_item_description (or the "
         "legacy curated_copy when that is the only copy field).\n"

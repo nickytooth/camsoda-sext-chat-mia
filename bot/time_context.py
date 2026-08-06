@@ -267,64 +267,80 @@ WEEKEND_PERIODS = {
 
 # Canonical catalog-facing context for visual-commerce matching.  This is kept
 # beside the schedule so changing where Mia is cannot silently leave the media
-# planner on an older location model.  ``fallback_reason`` is presentation
-# context only: it explains why an exact, current-looking item is unavailable;
-# it is never a technical capture/privacy gate.
+# planner on an older location model.  ``live_capture_blocker`` is the narrow,
+# schedule-grounded reason Mia cannot safely capture something fresh.  A null
+# value means the schedule does not establish a person nearby, so callers must
+# not invent one.  ``fallback_reason`` remains compatibility-only presentation
+# context; it is never a technical capture/privacy gate.
 MEDIA_CONTEXTS = {
     "night_bed": {
         "locations": ("bedroom", "home"),
+        "live_capture_blocker": "Tyler is asleep beside her",
         "fallback_reason": "she is already tucked into bed and has not taken that exact kind of shot tonight, so she pivots to one she already loves",
     },
     "morning_home": {
         "locations": ("bedroom", "home"),
+        "live_capture_blocker": None,
         "fallback_reason": "she is still under the covers and has not taken that exact kind of shot this morning, so she pivots to one she already loves",
     },
     "midday_gym": {
         "locations": ("gym", "locker_room"),
+        "live_capture_blocker": "other people are around her at the gym",
         "fallback_reason": "the gym is busy around her, so she pivots to a close alternative she already has",
     },
     "prework_home": {
         "locations": ("home", "bathroom", "kitchen", "shower"),
+        "live_capture_blocker": None,
         "fallback_reason": "she is midway through getting ready and has not taken that exact kind of shot right now, so she pivots to one she already loves",
     },
     "bar_shift": {
         "locations": ("bar", "stockroom"),
+        "live_capture_blocker": "customers and coworkers are around her at the bar",
         "fallback_reason": "there are customers and coworkers around the bar, so she pivots to something close she already has",
     },
     "evening_pregame": {
         "locations": ("home", "bathroom", "bedroom", "kitchen", "shower"),
+        "live_capture_blocker": "Tyler is on the couch in the next room",
         "fallback_reason": "she is home eating and getting ready and has not taken that exact kind of shot right now, so she pivots to one she already loves",
     },
     "club_night": {
         "locations": ("club", "bathroom", "car"),
+        "live_capture_blocker": "the club is crowded and she is out with the girls",
         "fallback_reason": "the club is crowded around her, so she pivots to something close she already has",
     },
     "weekend_night_bed": {
         "locations": ("bedroom", "home"),
+        "live_capture_blocker": "Tyler is asleep beside her",
         "fallback_reason": "she is already tucked into bed and has not taken that exact kind of shot tonight, so she pivots to one she already loves",
     },
     "weekend_hungover": {
         "locations": ("home", "bedroom"),
+        "live_capture_blocker": None,
         "fallback_reason": "she is sprawled out at home and has not taken that exact kind of shot today, so she pivots to one she already loves",
     },
     "weekend_brunch": {
         "locations": ("outdoors",),
+        "live_capture_blocker": "the girls and other brunch patrons are around her",
         "fallback_reason": "she is out at brunch with the girls, so she pivots to something close she already has",
     },
     "weekend_shopping": {
         "locations": ("outdoors", "car"),
+        "live_capture_blocker": "shoppers and store staff are around her",
         "fallback_reason": "she is out shopping around other people, so she pivots to something close she already has",
     },
     "weekend_home_tyler": {
         "locations": ("home",),
+        "live_capture_blocker": "Tyler is beside her on the couch",
         "fallback_reason": "she is at home with Tyler nearby, so she pivots to something close she already has",
     },
     "weekend_getting_ready": {
         "locations": ("home", "bathroom", "bedroom"),
+        "live_capture_blocker": None,
         "fallback_reason": "she is midway through getting ready and has not taken that exact kind of shot right now, so she pivots to one she already loves",
     },
     "weekend_club_night": {
         "locations": ("club", "bathroom", "car"),
+        "live_capture_blocker": "the club is crowded and she is out with the girls",
         "fallback_reason": "the club is crowded around her, so she pivots to something close she already has",
     },
 }
@@ -410,8 +426,9 @@ def get_media_context(period: str | None = None) -> dict:
 
     The returned values contain no catalog or storage details.  Callers use
     ``locations`` to rank current-place inventory first and
-    ``fallback_reason`` only as natural copy when that inventory has no
-    unopened match.
+    ``live_capture_blocker`` only when a fresh capture was explicitly requested.
+    ``fallback_reason`` is retained for callers using the older presentation
+    path.
     """
     current = period or get_time_period()
     context = MEDIA_CONTEXTS.get(current)
@@ -419,11 +436,13 @@ def get_media_context(period: str | None = None) -> dict:
         return {
             "period": current,
             "locations": (),
+            "live_capture_blocker": None,
             "fallback_reason": "she has not taken that exact kind of shot right now, so she pivots to one she already loves",
         }
     return {
         "period": current,
         "locations": tuple(context["locations"]),
+        "live_capture_blocker": context["live_capture_blocker"],
         "fallback_reason": context["fallback_reason"],
     }
 
@@ -436,6 +455,15 @@ def get_media_locations(period: str | None = None) -> tuple[str, ...]:
 def get_media_fallback_reason(period: str | None = None) -> str:
     """Natural context for an exact-current-item fallback, never a hard gate."""
     return get_media_context(period)["fallback_reason"]
+
+
+def get_media_live_capture_blocker(period: str | None = None) -> str | None:
+    """Return only a schedule-grounded reason a fresh capture is blocked.
+
+    ``None`` deliberately means no nearby person is established by the current
+    scene.  Offer copy must not invent Tyler, friends, or a crowd in that case.
+    """
+    return get_media_context(period)["live_capture_blocker"]
 
 
 def _is_weekend() -> bool:
@@ -567,10 +595,11 @@ async def get_time_prompt(heat: str | None = None) -> str:
             f"But this is just ONE thread of want — follow his rhythm and vary what you crave. "
             f"Let your location colour your replies naturally — never just announce the time, day, or weather. "
             f"Your location only colours the fantasy — it is NEVER a generic excuse to "
-            f"refuse him or pull back from the conversation. If a trusted commerce brief "
-            f"authorizes offer_fallback, its current-location reason is the narrow exception: "
-            f"explain it briefly, then pivot to the real alternative. Wherever you are, you "
-            f"always find a way to want him."
+            f"refuse him or pull back from the conversation. Only a trusted live/fresh "
+            f"commerce fallback may supply a grounded person who prevents a new capture; "
+            f"never invent one. Saved exact media needs no excuse, and a type or content "
+            f"fallback explains only that real difference before the attached alternative. "
+            f"Wherever you are, you always find a way to want him."
         )
     parts.append(scene_lines)
     parts.append(

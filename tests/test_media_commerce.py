@@ -3,13 +3,21 @@ import random
 import unittest
 from pathlib import Path
 
-from bot.media_catalog import MediaCatalog, load_media_catalog
-from bot.media_commerce import CommerceAction, MediaCommerceService
+from bot.media_catalog import MediaCatalog, MediaPresentation, load_media_catalog
+from bot.media_commerce import (
+    CommerceAction,
+    MediaCommerceService,
+    _spoken_fallback_context,
+    _spoken_item_description,
+)
 from bot.media_planner import classify_media_intent
-from bot.media_repository import MediaConfirmationRecord, OfferRecord
+from bot.media_repository import OfferRecord
 
 
 CATALOG_PATH = Path(__file__).resolve().parent / "fixtures" / "media_catalog.yaml"
+PRODUCTION_CATALOG_PATH = (
+    Path(__file__).resolve().parents[1] / "library" / "media_catalog.yaml"
+)
 
 
 class FakeRepository:
@@ -21,19 +29,6 @@ class FakeRepository:
         self.affinity = {}
         self.next_offer_id = 1
         self.cancelled_stale = 0
-        # Most existing planner tests exercise selection/rotation rather than
-        # the new confirmation gate, so they start in an already-confirmed
-        # session. Confirmation-specific tests clear this explicitly.
-        self.confirmation = MediaConfirmationRecord(
-            user_id=1,
-            status="granted",
-            requested_type=None,
-            tags={},
-            explicitness=None,
-            asked_at_batch=0,
-            expires_at=10**20,
-            updated_at=0.0,
-        )
 
     async def cancel_stale_reservations(self, user_id, *, older_than_seconds=600):
         self.cancelled_stale += 1
@@ -107,7 +102,7 @@ class FakeRepository:
             self.state["last_proactive_media_batch"] = row.batch_number
         if row.request_type == "generic":
             self.state["last_generic_media_type"] = media_type
-        if row.trigger in {"direct", "confirmed_direct", "permission_reask"}:
+        if row.trigger in {"direct", "permission_reask"}:
             await self.clear_sales_pause(row.user_id)
         return row
 
@@ -139,75 +134,44 @@ class FakeRepository:
     async def set_last_generic_media_type(self, user_id, media_type):
         self.state["last_generic_media_type"] = media_type
 
-    async def get_media_confirmation(self, user_id, *, now=None):
-        if (
-            self.confirmation is not None
-            and now is not None
-            and self.confirmation.expires_at < now
-        ):
-            self.confirmation = None
-        return self.confirmation
-
-    async def stage_media_confirmation(
-        self,
-        user_id,
-        *,
-        requested_type,
-        tags,
-        explicitness,
-        asked_at_batch,
-        expires_at,
-        now=None,
-    ):
-        self.confirmation = MediaConfirmationRecord(
-            user_id=user_id,
-            status="pending",
-            requested_type=requested_type,
-            tags={key: tuple(values) for key, values in tags.items()},
-            explicitness=explicitness,
-            asked_at_batch=asked_at_batch,
-            expires_at=expires_at,
-            updated_at=float(now or 0),
-        )
-        return self.confirmation
-
-    async def grant_media_confirmation(
-        self,
-        user_id,
-        *,
-        batch_number,
-        max_batch_gap,
-        granted_until,
-        now=None,
-    ):
-        row = self.confirmation
-        checked_at = float(now or 0)
-        if (
-            row is None
-            or row.status != "pending"
-            or row.expires_at < checked_at
-            or not (0 < batch_number - row.asked_at_batch <= max_batch_gap)
-        ):
-            self.confirmation = None
-            return None
-        self.confirmation = dataclasses.replace(
-            row,
-            status="granted",
-            expires_at=granted_until,
-            updated_at=checked_at,
-        )
-        return self.confirmation
-
-    async def clear_media_confirmation(self, user_id, *, pending_only=False):
-        if self.confirmation is None:
-            return False
-        if pending_only and self.confirmation.status != "pending":
-            return False
-        self.confirmation = None
-        return True
-
 
 class MediaIntentTests(unittest.TestCase):
+    def test_catalog_copy_is_rendered_in_mias_first_person_voice(self):
+        cases = {
+            "a photo from her bed": "a photo from my bed",
+            "a playful photo she took at home": "a playful photo I took at home",
+            "Mia's private bathroom clip": "my private bathroom clip",
+            "a photo of her": "a photo of me",
+            "a clip with her dancing": "a clip with me dancing",
+            "a photo of her in bed": "a photo of me in bed",
+            "a clip with her on the couch": "a clip with me on the couch",
+            "a photo of her body": "a photo of my body",
+            "a photo of herself in bed": "a photo of me in bed",
+            "Mia is posing in her bedroom": "I am posing in my bedroom",
+            "Mia was posing in her bedroom": "I was posing in my bedroom",
+            "Mia has saved this photo": "I have saved this photo",
+            "she's posing in her bedroom": "I'm posing in my bedroom",
+            "she hasn't shared this photo": "I haven't shared this photo",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(_spoken_item_description(raw), expected)
+
+        self.assertEqual(
+            _spoken_fallback_context("Tyler is asleep beside her"),
+            "Tyler is asleep beside me",
+        )
+        self.assertEqual(
+            _spoken_fallback_context("she is home getting ready"),
+            "I am home getting ready",
+        )
+        self.assertEqual(
+            _spoken_fallback_context(
+                "customers and coworkers are around her at the bar"
+            ),
+            "customers and coworkers are around me at the bar",
+        )
+
     def test_inventory_video_question_is_direct_but_story_mentions_are_not(self):
         inventory = classify_media_intent("do you have any videos?")
         self.assertTrue(inventory.requested)
@@ -262,15 +226,15 @@ class MediaIntentTests(unittest.TestCase):
         self.assertTrue(intent.decline_global)
 
     def test_do_not_sell_content_is_a_global_soft_decline(self):
-        for text in (
-            "don't sell me content",
-            "не ми продавай контент",
-        ):
-            with self.subTest(text=text):
-                intent = classify_media_intent(text)
-                self.assertEqual(intent.decline_kind, "soft")
-                self.assertTrue(intent.decline_global)
-                self.assertFalse(intent.requested)
+        intent = classify_media_intent("don't sell me content")
+        self.assertEqual(intent.decline_kind, "soft")
+        self.assertTrue(intent.decline_global)
+        self.assertFalse(intent.requested)
+
+    def test_cyrillic_media_request_is_blocked_in_english_only_runtime(self):
+        intent = classify_media_intent("прати send nudes")
+        self.assertFalse(intent.requested)
+        self.assertTrue(intent.blocked_request)
 
     def test_cue_plus_visual_facet_is_a_request(self):
         for text in ("show me your ass", "I want nudes", "send nudes"):
@@ -281,8 +245,6 @@ class MediaIntentTests(unittest.TestCase):
         for text in (
             "can I have a picture?",
             "could I have a photo, please?",
-            "може ли снимка?",
-            "може ли да ми пратиш снимка?",
         ):
             with self.subTest(text=text):
                 intent = classify_media_intent(text)
@@ -294,14 +256,13 @@ class MediaIntentTests(unittest.TestCase):
             "show me!!!",
             "show me 😏",
             "show me, please 😏",
-            "покажи ми се 😊",
         ):
             with self.subTest(text=text):
                 intent = classify_media_intent(text)
                 self.assertTrue(intent.requested)
                 self.assertIsNone(intent.requested_type)
 
-    def test_exact_explicit_request_and_confirmation_aliases(self):
+    def test_exact_explicit_request_and_affirmative_aliases(self):
         request = classify_media_intent("but I wanna see your pussy so bad babe")
         self.assertTrue(request.requested)
         self.assertIn("pussy", request.tags["body_focus"])
@@ -326,223 +287,175 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(decision.offer)
         return await self.service.mark_offer_delivered(decision.offer.offer_id)
 
-    async def stage_confirmation(self, decision):
-        self.assertEqual(decision.action, CommerceAction.ASK_MEDIA_CONFIRMATION)
-        self.assertIsNone(decision.offer)
-        self.assertTrue(await self.service.mark_commerce_action_delivered(decision))
-        self.assertEqual(self.repository.confirmation.status, "pending")
-
-    @staticmethod
-    def catalog_with_nude_video(*, only_video=False):
-        base = load_media_catalog(CATALOG_PATH)
-        nude_photo = base.require("mia_private_nude_001")
-        nude_video = dataclasses.replace(
-            nude_photo,
-            id="mia_private_nude_video_001",
-            media_type="video",
-            full_key="premium/mia_private_nude_video_001.mp4",
-            preview_key="previews/mia_private_nude_video_001.webp",
-            poster_key="posters/mia_private_nude_video_001.webp",
-            mime_type="video/mp4",
-            aspect_ratio=0.5625,
-            duration_seconds=12.0,
-            sha256="5" * 64,
-            presentation=dataclasses.replace(
-                nude_photo.presentation,
-                past_description="a private nude video from her bedroom",
-            ),
-        )
-        items = (nude_video,) if only_video else (*base.items, nude_video)
-        return MediaCatalog(items, version=base.version), nude_video
-
-    async def test_granted_explicit_scope_merges_with_new_video_type(self):
-        for text in ("do you have any videos?", "send me video"):
-            with self.subTest(text=text):
-                repository = FakeRepository()
-                repository.confirmation = MediaConfirmationRecord(
-                    user_id=1,
-                    status="granted",
-                    requested_type=None,
-                    tags={
-                        "body_focus": ("pussy",),
-                        "outfit": ("nude",),
-                    },
-                    explicitness="nude",
-                    asked_at_batch=1,
-                    expires_at=10**20,
-                    updated_at=1.0,
-                )
-                catalog, nude_video = self.catalog_with_nude_video()
-                service = MediaCommerceService(catalog, repository=repository)
-
-                decision = await service.plan_commerce_turn(
-                    1,
-                    text,
-                    batch_number=3,
-                    heat="rising",
-                    period="bar_shift",
-                )
-
-                self.assertIsNotNone(decision.offer)
-                self.assertEqual(decision.offer.content_id, nude_video.id)
-                self.assertEqual(decision.offer.media_type, "video")
-                self.assertEqual(decision.offer.request_type, "video")
-
-    async def test_generic_low_heat_video_grant_cannot_select_high_nude_video(self):
-        repository = FakeRepository()
-        repository.confirmation = MediaConfirmationRecord(
-            user_id=1,
-            status="granted",
-            requested_type=None,
-            tags={},
-            explicitness=None,
-            asked_at_batch=1,
-            expires_at=10**20,
-            updated_at=1.0,
-        )
-        catalog, _ = self.catalog_with_nude_video(only_video=True)
-        service = MediaCommerceService(catalog, repository=repository)
-
-        decision = await service.plan_commerce_turn(
+    async def plan_batch(
+        self,
+        messages,
+        *,
+        batch_number,
+        heat="low",
+        period="bar_shift",
+    ):
+        intent = await self.service.classify_media_turn(
             1,
-            "send me video",
-            batch_number=3,
+            messages,
+            batch_number=batch_number,
+        )
+        return await self.service.plan_commerce_turn(
+            1,
+            messages[-1] if messages else "",
+            batch_number=batch_number,
+            heat=heat,
+            period=period,
+            intent=intent,
+        )
+
+    async def test_first_direct_request_immediately_offers_at_low_heat(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "can you send me a picture?",
+            batch_number=1,
             heat="low",
             period="bar_shift",
         )
 
-        self.assertEqual(decision.action, CommerceAction.MEDIA_REQUEST_UNAVAILABLE)
-        self.assertIsNone(decision.offer)
+        self.assertEqual(decision.action, CommerceAction.OFFER_CURRENT)
+        self.assertIsNotNone(decision.offer)
+        self.assertEqual(decision.offer.media_type, "photo")
+        self.assertEqual(decision.offer.trigger, "direct")
 
-    async def test_first_direct_request_asks_then_now_emits_one_offer(self):
-        self.repository.confirmation = None
-        question = await self.service.plan_commerce_turn(
-            1, "can you send me a picture?", batch_number=1, heat="low", period="bar_shift"
-        )
-        await self.stage_confirmation(question)
-        self.assertEqual(self.repository.confirmation.requested_type, "photo")
-
-        accepted = await self.service.plan_commerce_turn(
-            1, "now!", batch_number=2, heat="low", period="bar_shift"
-        )
-        self.assertIsNotNone(accepted.offer)
-        self.assertEqual(accepted.offer.media_type, "photo")
-        self.assertEqual(accepted.offer.trigger, "confirmed_direct")
-
-        replay = await self.service.plan_commerce_turn(
-            1, "now!", batch_number=3, heat="low", period="bar_shift"
-        )
-        self.assertEqual(replay.action, CommerceAction.NONE)
-        self.assertIsNone(replay.offer)
-
-    async def test_repeated_explicit_request_refines_pending_intent_and_overrides_item_heat(self):
-        self.repository.confirmation = None
-        question = await self.service.plan_commerce_turn(
-            1, "can you send me a picture?", batch_number=1, heat="low", period="bar_shift"
-        )
-        await self.stage_confirmation(question)
-        self.repository.unlocked.update(
-            {"mia_bar_001", "mia_home_pose_001", "mia_club_clip_001"}
-        )
-
-        accepted = await self.service.plan_commerce_turn(
+    async def test_inventory_video_question_immediately_offers(self):
+        decision = await self.service.plan_commerce_turn(
             1,
-            "send nude now",
-            batch_number=2,
-            heat="rising",
+            "do you have any videos?",
+            batch_number=1,
+            heat="low",
             period="bar_shift",
         )
-        self.assertIsNotNone(accepted.offer)
-        self.assertEqual(accepted.offer.content_id, "mia_private_nude_001")
-        self.assertEqual(accepted.offer.request_type, "photo")
 
-    async def test_generic_confirmation_does_not_override_high_only_inventory(self):
-        self.repository.confirmation = None
-        self.repository.unlocked.update(
-            {"mia_bar_001", "mia_home_pose_001", "mia_club_clip_001"}
-        )
-        question = await self.service.plan_commerce_turn(
-            1, "send a photo", batch_number=1, heat="rising", period="bar_shift"
-        )
-        await self.stage_confirmation(question)
-        accepted = await self.service.plan_commerce_turn(
-            1, "yes", batch_number=2, heat="rising", period="bar_shift"
-        )
-        self.assertEqual(
-            accepted.action, CommerceAction.MEDIA_REQUEST_UNAVAILABLE
-        )
-        self.assertIsNone(accepted.offer)
+        self.assertIsNotNone(decision.offer)
+        self.assertEqual(decision.offer.media_type, "video")
+        self.assertEqual(decision.offer.request_type, "video")
+        self.assertEqual(decision.offer.trigger, "direct")
 
-    async def test_simple_confirmation_no_clears_without_sales_snooze(self):
-        self.repository.confirmation = None
-        question = await self.service.plan_commerce_turn(
-            1, "send nude now", batch_number=1, heat="rising", period="bar_shift"
-        )
-        await self.stage_confirmation(question)
-
-        cancelled = await self.service.plan_commerce_turn(
-            1, "no", batch_number=2, heat="rising", period="bar_shift"
-        )
-        self.assertEqual(cancelled.action, CommerceAction.CANCEL_MEDIA_CONFIRMATION)
-        self.assertIsNone(cancelled.offer)
-        self.assertIsNone(self.repository.confirmation)
-        self.assertIsNone(self.repository.state.get("sales_snooze_until_batch"))
-
-    async def test_hard_confirmation_decline_keeps_existing_100_batch_pause(self):
-        self.repository.confirmation = None
-        question = await self.service.plan_commerce_turn(
-            1, "send nude now", batch_number=1, heat="rising", period="bar_shift"
-        )
-        await self.stage_confirmation(question)
-
-        declined = await self.service.plan_commerce_turn(
-            1,
-            "never ask me again",
-            batch_number=2,
-            heat="rising",
-            period="bar_shift",
-        )
-        self.assertEqual(declined.action, CommerceAction.REACT_TO_DECLINE)
-        self.assertEqual(self.repository.state["sales_snooze_until_batch"], 102)
-        self.assertIsNone(self.repository.confirmation)
-
-    async def test_unrelated_turn_never_confirms_and_pending_expires_by_batch_gap(self):
-        self.repository.confirmation = None
-        question = await self.service.plan_commerce_turn(
-            1, "send nude now", batch_number=1, heat="rising", period="bar_shift"
-        )
-        await self.stage_confirmation(question)
-
-        unrelated = await self.service.plan_commerce_turn(
-            1, "how was work?", batch_number=2, heat="rising", period="bar_shift"
-        )
-        self.assertEqual(unrelated.action, CommerceAction.NONE)
-        self.assertEqual(self.repository.confirmation.status, "pending")
-
-        stale_yes = await self.service.plan_commerce_turn(
-            1, "yes", batch_number=6, heat="rising", period="bar_shift"
-        )
-        self.assertEqual(stale_yes.action, CommerceAction.NONE)
-        self.assertIsNone(stale_yes.offer)
-        self.assertIsNone(self.repository.confirmation)
-
-    async def test_granted_session_does_not_repeat_confirmation(self):
-        self.repository.confirmation = None
-        question = await self.service.plan_commerce_turn(
-            1, "send nude now", batch_number=1, heat="rising", period="bar_shift"
-        )
-        await self.stage_confirmation(question)
+    async def test_contextual_requests_require_recent_offer_or_unlock(self):
         first = await self.service.plan_commerce_turn(
-            1, "now!", batch_number=2, heat="rising", period="bar_shift"
+            1,
+            "send me a photo",
+            batch_number=1,
+            heat="low",
+            period="bar_shift",
         )
-        self.assertIsNotNone(first.offer)
-        await self.service.cancel_offer_reservation(first.offer.offer_id)
+        await self.deliver(first)
 
-        second = await self.service.plan_commerce_turn(
-            1, "send a video", batch_number=3, heat="rising", period="bar_shift"
+        for text, requested_type in (
+            ("another one", None),
+            ("what about a video?", "video"),
+        ):
+            with self.subTest(source="offer", text=text):
+                recent = await self.service.classify_media_turn(
+                    1,
+                    [text],
+                    batch_number=9,
+                )
+                stale = await self.service.classify_media_turn(
+                    1,
+                    [text],
+                    batch_number=10,
+                )
+                self.assertTrue(recent.requested)
+                self.assertEqual(recent.requested_type, requested_type)
+                self.assertFalse(stale.requested)
+
+        self.repository.history.clear()
+        self.repository.state["last_media_unlock_batch"] = 20
+        recent_unlock = await self.service.classify_media_turn(
+            1,
+            ["show me another"],
+            batch_number=28,
         )
-        self.assertNotEqual(second.action, CommerceAction.ASK_MEDIA_CONFIRMATION)
-        self.assertIsNotNone(second.offer)
+        stale_unlock = await self.service.classify_media_turn(
+            1,
+            ["show me another"],
+            batch_number=29,
+        )
+        self.assertTrue(recent_unlock.requested)
+        self.assertFalse(stale_unlock.requested)
+
+    async def test_bare_affirmative_only_accepts_immediate_permission_reask(self):
+        first = await self.service.plan_commerce_turn(
+            1,
+            "send me a photo",
+            batch_number=1,
+            heat="low",
+            period="bar_shift",
+        )
+        await self.deliver(first)
+
+        recent_offer_yes = await self.service.classify_media_turn(
+            1,
+            ["yes"],
+            batch_number=2,
+        )
+        self.assertTrue(recent_offer_yes.affirmative)
+        self.assertFalse(recent_offer_yes.requested)
+
+        self.repository.state.update(
+            sales_snooze_until_batch=20,
+            sales_reask_pending=True,
+            sales_reask_asked_at_batch=20,
+        )
+        immediate = await self.service.classify_media_turn(
+            1,
+            ["yes"],
+            batch_number=21,
+        )
+        late = await self.service.classify_media_turn(
+            1,
+            ["yes"],
+            batch_number=22,
+        )
+        self.assertTrue(immediate.requested)
+        self.assertTrue(immediate.affirmative)
+        self.assertFalse(late.requested)
+
+        accepted = await self.service.plan_commerce_turn(
+            1,
+            "yes",
+            batch_number=21,
+            heat="high",
+            period="bar_shift",
+            intent=immediate,
+        )
+        self.assertIsNotNone(accepted.offer)
+        self.assertEqual(accepted.offer.trigger, "permission_reask")
+
+    async def test_latest_decisive_raw_batch_command_wins(self):
+        declined = await self.service.classify_media_turn(
+            1,
+            ["send me a photo", "haha", "no, not now", "thanks"],
+            batch_number=1,
+        )
+        self.assertFalse(declined.requested)
+        self.assertEqual(declined.decline_kind, "soft")
+
+        requested = await self.service.classify_media_turn(
+            1,
+            ["not now", "wait", "actually send me a video", "please"],
+            batch_number=2,
+        )
+        self.assertTrue(requested.requested)
+        self.assertEqual(requested.requested_type, "video")
+
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "please",
+            batch_number=2,
+            heat="low",
+            period="bar_shift",
+            intent=requested,
+        )
+        self.assertIsNotNone(decision.offer)
+        self.assertEqual(decision.offer.trigger, "direct")
 
     async def test_raw_lifetime_count_does_not_unlock_proactive_offer(self):
         self.repository.state["lifetime_user_messages"] = 200
@@ -569,7 +482,12 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
             1, "more flirting", batch_number=16, heat="high", period="bar_shift"
         )
         self.assertIn(
-            ready.action, {CommerceAction.OFFER_CURRENT, CommerceAction.OFFER_FALLBACK}
+            ready.action,
+            {
+                CommerceAction.OFFER_CURRENT,
+                CommerceAction.OFFER_SAVED,
+                CommerceAction.OFFER_FALLBACK,
+            },
         )
 
     async def test_low_heat_never_gets_proactive_offer(self):
@@ -612,10 +530,174 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, CommerceAction.OFFER_CURRENT)
         self.assertEqual(decision.item_locations, ("bar", "bathroom"))
         self.assertEqual(decision.current_locations, ("bar", "stockroom"))
-        self.assertEqual(
-            decision.offered_item_description,
-            decision.offer.description,
+        self.assertIn("my bar shift", decision.offered_item_description)
+        self.assertIn("her bar shift", decision.offer.description)
+        self.assertNotEqual(decision.offered_item_description, decision.offer.description)
+
+    async def test_exact_past_only_match_is_a_saved_offer_with_spoken_copy(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "send me a pic from your pussy",
+            batch_number=1,
+            heat="high",
+            period="evening_pregame",
         )
+
+        self.assertEqual(decision.action, CommerceAction.OFFER_SAVED)
+        self.assertEqual(decision.offer.content_id, "mia_private_nude_001")
+        self.assertIn("from my bedroom", decision.offered_item_description)
+        self.assertIn("from her bedroom", decision.offer.description)
+        self.assertEqual(decision.current_context, "")
+        self.assertIn("special moment", decision.brief)
+        self.assertNotIn("Tyler", decision.brief)
+
+    async def test_live_past_only_match_uses_grounded_blocker_and_fallback(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "show me a photo of your pussy right now",
+            batch_number=1,
+            heat="high",
+            period="evening_pregame",
+        )
+
+        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+        self.assertEqual(decision.offer.content_id, "mia_private_nude_001")
+        self.assertIn("Tyler is on the couch", decision.current_context)
+        self.assertIn("I cannot capture", decision.current_context)
+        self.assertNotIn(" she ", f" {decision.current_context.lower()} ")
+        self.assertIn("from my bedroom", decision.offered_item_description)
+
+    async def test_live_fallback_when_alone_never_invents_a_person(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "show me a photo of your pussy right now",
+            batch_number=1,
+            heat="high",
+            period="morning_home",
+        )
+
+        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+        self.assertIn("I do not have a fresh version", decision.current_context)
+        for invented in ("Tyler", "friend", "girl", "customer", "coworker"):
+            self.assertNotIn(invented, decision.current_context)
+
+    async def test_split_production_pussy_request_selects_exact_saved_photo(self):
+        repository = FakeRepository()
+        service = MediaCommerceService(
+            load_media_catalog(PRODUCTION_CATALOG_PATH),
+            repository=repository,
+            random_source=random.Random(7),
+        )
+        intent = await service.classify_media_turn(
+            1,
+            ["send me a pic", "from your pussy"],
+            batch_number=1,
+        )
+        decision = await service.plan_commerce_turn(
+            1,
+            "from your pussy",
+            batch_number=1,
+            heat="low",
+            period="evening_pregame",
+            intent=intent,
+        )
+
+        self.assertEqual(decision.offer.content_id, "mia_bedroom_001")
+        self.assertEqual(decision.action, CommerceAction.OFFER_SAVED)
+        self.assertEqual(decision.current_context, "")
+
+    async def test_exact_alternate_video_beats_unrelated_requested_photo(self):
+        catalog = load_media_catalog(CATALOG_PATH)
+        club_video = catalog.require("mia_club_clip_001")
+        pussy_video = dataclasses.replace(
+            club_video,
+            tags={**club_video.tags, "body_focus": ("pussy", "full_body")},
+        )
+        repository = FakeRepository()
+        repository.unlocked.add("mia_private_nude_001")
+        service = MediaCommerceService(
+            MediaCatalog(
+                pussy_video if item.id == pussy_video.id else item
+                for item in catalog.items
+            ),
+            repository=repository,
+            random_source=random.Random(7),
+        )
+
+        decision = await service.plan_commerce_turn(
+            1,
+            "send me a photo of your pussy",
+            batch_number=1,
+            heat="high",
+            period="morning_home",
+        )
+
+        self.assertEqual(decision.offer.content_id, "mia_club_clip_001")
+        self.assertEqual(decision.offer.media_type, "video")
+        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+
+    async def test_exact_alternate_photo_beats_unrelated_requested_video(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "send me a video behind the bar",
+            batch_number=1,
+            heat="high",
+            period="morning_home",
+        )
+
+        self.assertEqual(decision.offer.content_id, "mia_bar_001")
+        self.assertEqual(decision.offer.media_type, "photo")
+        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+
+    async def test_exact_requested_type_remains_ahead_of_exact_alternate_type(self):
+        decision = await self.service.plan_commerce_turn(
+            1,
+            "send me a photo of your boobs",
+            batch_number=1,
+            heat="high",
+            period="club_night",
+        )
+
+        self.assertEqual(decision.offer.content_id, "mia_bar_001")
+        self.assertEqual(decision.offer.media_type, "photo")
+
+    async def test_current_location_breaks_tie_between_saved_exact_items(self):
+        catalog = load_media_catalog(CATALOG_PATH)
+        base = catalog.require("mia_home_pose_001")
+        past = MediaPresentation(
+            mode="past_only",
+            periods=(),
+            current_description=None,
+            past_description="a saved playful full-body photo",
+        )
+        club = dataclasses.replace(
+            base,
+            id="aaa_club_saved",
+            presentation=past,
+            tags={**base.tags, "location": ("club",)},
+        )
+        home = dataclasses.replace(
+            base,
+            id="zzz_home_saved",
+            presentation=past,
+            tags={**base.tags, "location": ("home",)},
+        )
+        service = MediaCommerceService(
+            MediaCatalog((club, home)),
+            repository=FakeRepository(),
+            random_source=random.Random(7),
+        )
+
+        decision = await service.plan_commerce_turn(
+            1,
+            "send me a photo",
+            batch_number=1,
+            heat="low",
+            period="morning_home",
+        )
+
+        self.assertEqual(decision.offer.content_id, "zzz_home_saved")
+        self.assertEqual(decision.action, CommerceAction.OFFER_SAVED)
 
     async def test_explicit_requested_location_beats_current_location(self):
         decision = await self.service.plan_commerce_turn(
@@ -626,7 +708,9 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
             period="morning_home",
         )
         self.assertEqual(decision.offer.content_id, "mia_bar_001")
-        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
+        self.assertEqual(decision.action, CommerceAction.OFFER_SAVED)
+        self.assertEqual(decision.current_context, "")
+        self.assertNotIn("current context", decision.brief.lower())
 
     async def test_requested_body_from_other_location_beats_wrong_current_body(self):
         decision = await self.service.plan_commerce_turn(
@@ -639,17 +723,17 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.offer.content_id, "mia_bar_001")
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
 
-    async def test_unlocked_current_item_is_excluded_and_fallback_is_contextual(self):
+    async def test_unlocked_current_item_is_excluded_and_exact_saved_item_needs_no_excuse(self):
         self.repository.unlocked.add("mia_bar_001")
         decision = await self.service.plan_commerce_turn(
             1, "send a photo", batch_number=1, heat="rising", period="bar_shift"
         )
         self.assertEqual(decision.offer.content_id, "mia_home_pose_001")
-        self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
-        self.assertIn("Current context:", decision.brief)
+        self.assertEqual(decision.action, CommerceAction.OFFER_SAVED)
+        self.assertIn("saved", decision.brief.lower())
         self.assertEqual(decision.item_locations, ("home", "bedroom"))
         self.assertEqual(decision.current_locations, ("bar", "stockroom"))
-        self.assertTrue(decision.current_context)
+        self.assertEqual(decision.current_context, "")
 
     async def test_fallback_explains_both_location_and_requested_type_mismatch(self):
         self.repository.unlocked.add("mia_club_clip_001")
@@ -658,8 +742,8 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(decision.offer.media_type, "photo")
         self.assertEqual(decision.action, CommerceAction.OFFER_FALLBACK)
-        self.assertIn("does not have a video", decision.brief)
-        self.assertIn("photo is the closest alternative", decision.brief)
+        self.assertIn("I do not have that as a video", decision.brief)
+        self.assertIn("exactly that as a photo", decision.brief)
 
     async def test_generic_request_starts_photo_then_alternates_video(self):
         first = await self.service.plan_commerce_turn(
@@ -783,7 +867,7 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_global_do_not_sell_decline_snoozes_without_a_recent_offer(self):
-        for text in ("don't sell me content", "не ми продавай контент"):
+        for text in ("don't sell me content",):
             with self.subTest(text=text):
                 self.repository.state.clear()
                 decline = await self.service.plan_commerce_turn(
@@ -886,6 +970,34 @@ class MediaCommercePlanningTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(
             self.repository.state["sales_snooze_until_batch"] - 41, 30
         )
+
+    async def test_final_no_blocks_permission_reask_affirmative(self):
+        for text in ("yes, no", "yes, but no"):
+            with self.subTest(text=text):
+                self.repository.state.update(
+                    sales_snooze_until_batch=40,
+                    sales_reask_pending=True,
+                    sales_reask_asked_at_batch=40,
+                )
+                intent = await self.service.classify_media_turn(
+                    1,
+                    [text],
+                    batch_number=41,
+                )
+                self.assertFalse(intent.requested)
+                self.assertFalse(intent.affirmative)
+                self.assertEqual(intent.decline_kind, "soft")
+
+                decision = await self.service.plan_commerce_turn(
+                    1,
+                    text,
+                    batch_number=41,
+                    heat="high",
+                    period="bar_shift",
+                    intent=intent,
+                )
+                self.assertEqual(decision.action, CommerceAction.REACT_TO_DECLINE)
+                self.assertIsNone(decision.offer)
 
     async def test_unrelated_reask_answer_keeps_sales_paused(self):
         self.repository.state.update(

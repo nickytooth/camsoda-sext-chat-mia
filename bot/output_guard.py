@@ -101,15 +101,74 @@ _FIRST_PERSON_MEDIA_CLAIM_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-_MEDIA_OFFER_ACTIONS = frozenset({"offer_current", "offer_fallback"})
-_MEDIA_CONFIRMATION_ACTIONS = frozenset({"ask_media_confirmation"})
+_MEDIA_OFFER_ACTIONS = frozenset(
+    {"offer_current", "offer_saved", "offer_fallback"}
+)
 _MEDIA_UNAVAILABLE_ACTIONS = frozenset({"media_request_unavailable"})
 
-_MEDIA_CONFIRMATION_CHALLENGE_RE = re.compile(
-    r"(?:\?|\b(?:are\s+you\s+sure|you\s+sure|really\s+want|still\s+want|"
-    r"want\s+me\s+to|wanna\s+go\s+there|ready\s+to|mean\s+it|no\s+going\s+back)\b)",
+# Scope third-person checks to clauses that actually describe the selected
+# item. This rejects ``this photo shows her naked`` without treating unrelated
+# dialogue such as ``I want to see her reaction`` as Mia describing herself.
+_MEDIA_OFFER_MIA_NAME_RE = re.compile(
+    r"\bMia(?:'s|\u2019s)?\b",
     re.IGNORECASE,
 )
+_MEDIA_OFFER_OTHER_WOMAN_RE = re.compile(
+    r"\b(?:my|his|the)\s+(?:friend|sister|coworker|roommate|girlfriend|"
+    r"woman|girl|model)\b",
+    re.IGNORECASE,
+)
+_MEDIA_OFFER_REFERENCE = rf"(?:{_MEDIA_TERM}|this|that|it|one)"
+_MEDIA_OFFER_VISUAL_STATE = (
+    r"(?:naked|nude|topless|posing|dancing|undressing|showering|"
+    r"in\b|on\b|at\b)"
+)
+_MEDIA_OFFER_SELF_CLAUSE_RES = tuple(
+    re.compile(pattern, re.IGNORECASE | re.DOTALL)
+    for pattern in (
+        r"\b(?:this|that)(?:'s|\s+is)\s+(?:her|herself)\b",
+        rf"\b{_MEDIA_TERM}\s+(?:of|from)\s+(?:her|herself)\b",
+        rf"\b{_MEDIA_TERM}\b.{{0,24}}\bwith\s+(?:her|herself)\s+"
+        rf"{_MEDIA_OFFER_VISUAL_STATE}",
+        rf"\bher\s+(?:{_MEDIA_TERM}|body|face|boobs?|breasts?|pussy|ass|"
+        rf"legs?|feet|outfit|lingerie)\b",
+        rf"\bher\s+{_MEDIA_OFFER_VISUAL_STATE}.{{0,64}}\b"
+        rf"{_MEDIA_OFFER_REFERENCE}\b",
+        rf"\bshe\s+(?:took|shot|made|filmed|recorded|saved|kept|sent|picked|"
+        rf"chose|posed)\b.{{0,80}}\b{_MEDIA_OFFER_REFERENCE}\b",
+        rf"\b{_MEDIA_OFFER_REFERENCE}\b.{{0,80}}\bshe\s+(?:took|shot|made|"
+        rf"filmed|recorded|saved|kept|sent|picked|chose|posed)\b",
+        rf"\b{_MEDIA_OFFER_REFERENCE}\b.{{0,64}}\b(?:where\s+)?she"
+        rf"(?:'s|\s+is|\s+was)\s+{_MEDIA_OFFER_VISUAL_STATE}",
+        rf"\bshe(?:'s|\s+is|\s+was)\s+{_MEDIA_OFFER_VISUAL_STATE}.{{0,64}}"
+        rf"\b{_MEDIA_OFFER_REFERENCE}\b",
+        rf"\b(?:see|shows?|showing|features?|featuring|captures?|capturing)"
+        rf"\s+(?:her|herself)\s+{_MEDIA_OFFER_VISUAL_STATE}",
+        rf"\b{_MEDIA_TERM}\b.{{0,40}}\b(?:is|has|shows?|features?|captures?)"
+        rf"\s+(?:her|herself)\b",
+    )
+)
+_MEDIA_OFFER_SELF_ORIGIN_RE = re.compile(
+    rf"\b{_MEDIA_OFFER_REFERENCE}\b.{{0,48}}\bfrom\s+her\s+"
+    r"(?:bed|bedroom|bathroom|home|house|room|car|hotel|phone|shift)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _has_third_person_offer_self_reference(text: str) -> bool:
+    if _MEDIA_OFFER_MIA_NAME_RE.search(text):
+        return True
+    clauses = re.split(r"(?:[.!?;]+|\n+)", text)
+    for clause in clauses:
+        if not re.search(r"\b(?:she|her|herself)\b", clause, re.IGNORECASE):
+            continue
+        if _MEDIA_OFFER_OTHER_WOMAN_RE.search(clause):
+            continue
+        if any(pattern.search(clause) for pattern in _MEDIA_OFFER_SELF_CLAUSE_RES):
+            return True
+        if _MEDIA_OFFER_SELF_ORIGIN_RE.search(clause):
+            return True
+    return False
 
 _MEDIA_CONTEXTUAL_DELIVERY_RE = re.compile(
     r"(?:\bi(?:'ll|\s+will|\s+can|\s+could|\s+might|\s+may|\s+wanna|"
@@ -126,32 +185,6 @@ _MEDIA_UNAVAILABLE_BARGAIN_RE = re.compile(
     r"be\s+a\s+good\s+(?:boy|girl)|bad\s+(?:boy|girl)|special\s+enough|"
     r"i(?:'ll|\s+will)\s+think\s+about\s+it)\b",
     re.IGNORECASE,
-)
-
-# A confirmation turn may ask whether he truly wants to see a picture, but it
-# still cannot claim inventory or delivery.  This narrower grammar remains in
-# force until a real structured offer card is attached on a later turn.
-_MEDIA_CONFIRMATION_FORBIDDEN_CLAIM_RE = re.compile(
-    rf"(?:"
-    rf"\bi(?:(?:'ve| have| do\s+have)\s+(?:got\s+)?| got\s+| own\s+)"
-    rf"(?:(?:a|an|the|this|that|my|some|another|one|two|\d+)\s+)?"
-    rf"{_MEDIA_QUALIFIER}{_MEDIA_TERM}\b|"
-    rf"\b(?:i(?:(?:'ve| have|'m| am|'ll| will)\s+|\s+)|let\s+me\s+)"
-    rf"(?:send|sending|sent|attach|attaching|attached|post|posting|posted|"
-    rf"upload|uploading|uploaded|share|sharing|shared|make|making|made|take|"
-    rf"taking|took|record|recording|recorded|film|filming|filmed|save|saving|"
-    rf"saved|pick|picking|picked|choose|choosing|chose|show|showing|showed)"
-    rf"\b.{{0,64}}\b{_MEDIA_TERM}\b|"
-    rf"\b(?:here(?:'s|\s+is|\s+are)|this\s+is)\s+"
-    rf"(?:(?:a|an|the|this|that|my|some|one|two|\d+)\s+)?"
-    rf"{_MEDIA_QUALIFIER}{_MEDIA_TERM}\b|"
-    rf"\b(?:open|unlock|watch|check(?:\s+out)?|look\s+at)\s+"
-    rf"(?:the|this|that|my)\s+{_MEDIA_TERM}\b|"
-    rf"\b(?:i\s+(?:have|got)\s+something\s+(?:for\s+you|to\s+show)|"
-    rf"i(?:'ll|\s+will|\s+can|\s+could|\s+wanna|\s+want\s+to)\s+"
-    rf"(?:send|attach|post|upload|share|show)\s+(?:it|something)\b)"
-    rf")",
-    re.IGNORECASE | re.DOTALL,
 )
 
 _PHOTO_MEDIA_TERM_RE = re.compile(
@@ -412,11 +445,6 @@ def _media_location_matches_description(
 def _media_offer_is_authorized(commerce_action: object | None) -> bool:
     value = getattr(commerce_action, "value", commerce_action)
     return str(value) in _MEDIA_OFFER_ACTIONS
-
-
-def _media_confirmation_is_authorized(commerce_action: object | None) -> bool:
-    value = getattr(commerce_action, "value", commerce_action)
-    return str(value) in _MEDIA_CONFIRMATION_ACTIONS
 
 
 def _media_unavailable_is_authorized(commerce_action: object | None) -> bool:
@@ -1042,33 +1070,20 @@ def validate_mia_reply(
     if _SERVICE_RE.search(check_value):
         reasons.append("service_voice")
     offer_authorized = _media_offer_is_authorized(commerce_action)
-    confirmation_authorized = _media_confirmation_is_authorized(commerce_action)
     unavailable_action = _media_unavailable_is_authorized(commerce_action)
     unbacked_location_claim = _has_unbacked_location_media_claim(check_value)
     media_claim = bool(
         _FIRST_PERSON_MEDIA_CLAIM_RE.search(check_value)
         or unbacked_location_claim
     )
-    safe_confirmation_question = bool(
-        confirmation_authorized
-        and not unbacked_location_claim
-        and not _MEDIA_CONFIRMATION_FORBIDDEN_CLAIM_RE.search(check_value)
-    )
-    if media_claim and not offer_authorized and not safe_confirmation_question:
+    if media_claim and not offer_authorized:
         reasons.append("unauthorized_media_claim")
-    if confirmation_authorized and not _MEDIA_CONFIRMATION_CHALLENGE_RE.search(
-        check_value
-    ):
-        reasons.append("media_confirmation_missing_challenge")
+    if offer_authorized and _has_third_person_offer_self_reference(check_value):
+        reasons.append("media_offer_third_person_voice")
     if unavailable_action and _MEDIA_CONTEXTUAL_DELIVERY_RE.search(check_value):
         reasons.append("unauthorized_media_claim")
     if unavailable_action and _MEDIA_UNAVAILABLE_BARGAIN_RE.search(check_value):
         reasons.append("media_unavailable_bargaining")
-    if (
-        confirmation_authorized
-        and _MEDIA_CONFIRMATION_FORBIDDEN_CLAIM_RE.search(check_value)
-    ):
-        reasons.append("unauthorized_media_claim")
     if offer_authorized and (
         media_claim or _media_location_claims(check_value)
     ):
@@ -1261,6 +1276,11 @@ def correction_prompt(
             "The attached card contains exactly one backend-selected item. Describe only its "
             "selected media type, explicitness, and setting from the trusted commerce brief; "
             "never change them or imply multiple files."
+        )
+    if "media_offer_third_person_voice" in reasons:
+        constraints.append(
+            "Describe your own offered item only in first person with I, me, and my. "
+            "Never call yourself Mia or use she/her for yourself or the item."
         )
     if "commerce_price_claim" in reasons:
         constraints.append(
