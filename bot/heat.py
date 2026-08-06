@@ -448,6 +448,7 @@ def advance_heat(
     batch_number: int,
     timeout_seconds: int = HEAT_TIMEOUT_SECONDS,
     commerce_decline: bool = False,
+    suppress_progression: bool = False,
 ) -> HeatTurnResult:
     """Reduce one ordered processed batch into one durable heat transition."""
 
@@ -463,6 +464,7 @@ def advance_heat(
     clauses = _clauses(raw_messages)
     blocked_acts = list(state.blocked_acts)
     newly_blocked: list[str] = []
+    saw_act_boundary = False
     saw_global = False
     saw_commerce_decline = False
 
@@ -472,18 +474,23 @@ def advance_heat(
         if _is_negated_stop_continuation(clause):
             continue
         acts = _withdrawn_acts(clause)
+        saw_act_boundary = saw_act_boundary or bool(acts)
         for act in acts:
             if act not in blocked_acts:
                 blocked_acts.append(act)
                 newly_blocked.append(act)
         saw_global = saw_global or _is_global_withdrawal(
-            clause, warm=state.progress > 0 or state.consent_paused
+            clause,
+            # When the same processed turn also contains a detected control
+            # attack, a bare "stop" is still treated conservatively as a real
+            # boundary even if there was no earlier Heat state.
+            warm=state.progress > 0 or state.consent_paused or suppress_progression,
         )
         saw_commerce_decline = saw_commerce_decline or _is_media_decline(
             clause, commerce_decline=commerce_decline
         )
 
-    if newly_blocked or any(act not in state.blocked_acts for act in blocked_acts):
+    if saw_act_boundary:
         if saw_global:
             progress = 0
             last_sexual_at = 0.0
@@ -528,9 +535,17 @@ def advance_heat(
         # A sexual initiative earlier in this same raw batch makes a following
         # bare "stop" unambiguous even though the one-credit progression is
         # intentionally committed only after the whole batch is reduced.
-        warm = progress > 0 or consent_paused or pending_credit or pending_ambient
+        warm = (
+            progress > 0
+            or consent_paused
+            or pending_credit
+            or pending_ambient
+            or suppress_progression
+        )
 
         if _is_negated_stop_continuation(clause):
+            if suppress_progression:
+                continue
             if warm:
                 if consent_paused:
                     progress = 0
@@ -578,6 +593,13 @@ def advance_heat(
             pending_cooling = True
             policy = "cooling"
             signal = "cooling"
+            continue
+
+        # A backend-detected meta-control attempt still gets full consent,
+        # de-escalation, and scene-end handling above, but quoted sexual wording
+        # must not raise Heat, reopen a paused scene, or manufacture commerce
+        # eligibility.
+        if suppress_progression:
             continue
 
         contextual = bool(_CONTEXTUAL_SEXUAL_RE.fullmatch(clause))
@@ -649,7 +671,8 @@ def advance_heat(
         newly_blocked_acts=tuple(newly_blocked),
         advanced=advanced,
         suppress_commerce=(
-            saw_commerce_decline
+            suppress_progression
+            or saw_commerce_decline
             or consent_paused
             or policy in {"acknowledge_pause", "soft_deescalation", "cooling"}
         ),

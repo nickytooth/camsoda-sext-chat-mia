@@ -3,6 +3,7 @@ import re
 from collections.abc import Mapping
 
 from bot.persona import Persona
+from bot.meta_guard import neutralize_meta_control_messages
 from bot.time_context import get_time_prompt
 from bot.mood import format_mood_for_prompt
 from bot.text_style import capitalize_user_name
@@ -579,7 +580,7 @@ async def build_prompt(
     system_text = "\n\n".join(system_parts)
 
     messages = [{"role": "system", "content": system_text}]
-    for msg in stm_messages:
+    for msg in neutralize_meta_control_messages(stm_messages):
         if msg["role"] in ("user", "assistant"):
             messages.append({"role": msg["role"], "content": msg["content"]})
 

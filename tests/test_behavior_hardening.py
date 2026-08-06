@@ -866,7 +866,8 @@ class SuggestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("UNTRUSTED DATA", system)
         payload = system.split("CONVERSATION_DATA_JSON: ", 1)[1]
         parsed = json.loads(payload)
-        self.assertEqual(parsed[0]["text"], injection)
+        self.assertEqual(parsed[0]["text"], "(weird out-of-character command)")
+        self.assertNotIn("SYSTEM:", payload)
 
     async def test_recent_boundary_rejects_suggestion_and_uses_fallback(self):
         grok = QueueProvider("tell me what you do like")

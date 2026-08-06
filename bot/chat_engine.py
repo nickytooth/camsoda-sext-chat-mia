@@ -14,6 +14,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from bot.persona import Persona, load_persona
+from bot.meta_guard import (
+    MetaControlAttempt,
+    detect_meta_control_batch,
+    meta_deflection_candidates,
+    neutralize_meta_control_messages,
+)
 from bot.memory.stm import add_message, get_recent_messages, replace_assistant_message
 from bot.memory.ltm import retrieve_relevant, should_retrieve, get_recent_by_category
 from bot.memory.summarizer import maybe_summarize, maybe_compact
@@ -541,6 +547,56 @@ class ChatEngine:
         await add_message(user_id, "assistant", "\n".join(messages), mode=mode)
         return ChatResponse(messages=messages)
 
+    async def _persist_meta_deflection(
+        self,
+        user_id: int,
+        attempt: MetaControlAttempt,
+        *,
+        heat: str,
+        user_facts: list[dict] | None,
+        recent_user_texts: list[str],
+        consent_paused: bool,
+        turn_policy: str | None,
+        blocked_acts: tuple[str, ...],
+        mode: str = "sexting",
+    ) -> ChatResponse:
+        """Persist one validated, backend-authored in-character meta deflection."""
+
+        candidates = meta_deflection_candidates(attempt) + (
+            "hahah what is this? talk to me like a normal person",
+            "wait what was that little speech supposed to be?",
+            "you really thought that would work? that's cute",
+        )
+        response_text = ""
+        for candidate in candidates:
+            if validate_mia_reply(
+                candidate,
+                heat=heat,
+                user_facts=user_facts,
+                recent_user_texts=recent_user_texts,
+                consent_paused=consent_paused,
+                turn_policy=turn_policy,
+                blocked_acts=blocked_acts,
+            ).ok:
+                response_text = candidate
+                break
+
+        if not response_text:
+            return await self._persist_graceful_fallback(
+                user_id,
+                heat=heat,
+                user_facts=user_facts,
+                recent_user_texts=recent_user_texts,
+                consent_paused=consent_paused,
+                turn_policy=turn_policy,
+                blocked_acts=blocked_acts,
+                mode=mode,
+            )
+
+        parts = self._split_response(response_text, vary=True)
+        await add_message(user_id, "assistant", "\n".join(parts), mode=mode)
+        return ChatResponse(messages=parts)
+
     @staticmethod
     def _current_heat_state(
         engagement_state: object | None,
@@ -890,12 +946,13 @@ class ChatEngine:
         user_facts = _with_heat_boundaries(user_facts, heat_state.blocked_acts)
         heat = "low" if heat_state.consent_paused else heat_state.stage
 
+        model_stm = neutralize_meta_control_messages(stm)
         transcript_data = [
             {
                 "speaker": "user" if message["role"] == "user" else "mia",
                 "text": str(message.get("content", ""))[:1000],
             }
-            for message in stm[-20:]
+            for message in model_stm[-20:]
             if message.get("role") in {"user", "assistant"}
         ]
         boundary_data = [
@@ -1093,6 +1150,7 @@ class ChatEngine:
             final_messages,
             heat=heat,
             user_facts=user_facts,
+            recent_user_texts=_recent_user_texts(stm),
             consent_paused=heat_state.consent_paused,
             blocked_acts=heat_state.blocked_acts,
         )
@@ -1211,6 +1269,7 @@ class ChatEngine:
             temperature=self._TEMP_CARDS,
             heat="high",
             user_facts=user_facts,
+            recent_user_texts=_recent_user_texts(stm),
             blocked_acts=card_heat_state.blocked_acts,
         )
         if not response_text:
@@ -1383,6 +1442,7 @@ class ChatEngine:
             temperature=self._TEMP_CARDS,
             heat="high",
             user_facts=user_facts,
+            recent_user_texts=recent_user_texts,
             blocked_acts=card_heat_state.blocked_acts,
         )
         if not response_text:
@@ -1431,12 +1491,18 @@ class ChatEngine:
         # (process_sexting_batched / process_message), not here, so that
         # history is never lost while a batch is still pending.
         mode = "sexting"
+        raw_batch = list(raw_texts if raw_texts is not None else [text])
+        direct_meta_attempt = detect_meta_control_batch(raw_batch)
 
         async def _llm_call(prompt: str) -> str:
             return await self.classifier_provider.generate_simple(prompt)
 
-        await maybe_summarize(user_id, _llm_call, mode=mode)
-        await maybe_compact(user_id, _llm_call, mode=mode)
+        # A direct control/exfiltration attempt takes the deterministic path and
+        # must not be copied into an avoidable summarizer/compactor model call.
+        # Contextual piecemeal follow-ups are detected after STM is loaded.
+        if direct_meta_attempt is None:
+            await maybe_summarize(user_id, _llm_call, mode=mode)
+            await maybe_compact(user_id, _llm_call, mode=mode)
 
         # Capture how long since the user last messaged (before track_heat_batch
         # overwrites last_message_at) so she can greet like a real person.
@@ -1471,11 +1537,24 @@ class ChatEngine:
         if not stm or not any(m["role"] == "user" for m in stm):
             stm = [{"role": "user", "content": text}]
 
+        # Current raw rows are already at the tail of STM. Keep a short slice of
+        # earlier user turns solely for narrow piecemeal-extraction follow-ups;
+        # the detector never grants those rows instruction authority.
+        stm_user_texts = [
+            str(message.get("content", ""))
+            for message in stm
+            if message.get("role") == "user"
+        ]
+        prior_user_count = max(0, len(stm_user_texts) - len(raw_batch))
+        meta_attempt = direct_meta_attempt or detect_meta_control_batch(
+            raw_batch,
+            recent_user_texts=stm_user_texts[max(0, prior_user_count - 8):prior_user_count],
+        )
+
         # Heat advances exactly once per processed debounce batch.  The raw
         # messages stay ordered so a final "stop" cannot be hidden by the
         # newline-joined text sent to the model, while 200 rapid messages still
         # count as one progression step.
-        raw_batch = list(raw_texts if raw_texts is not None else [text])
         commerce_decline = False
         decline_checker = (
             getattr(self.commerce_service, "is_confirmed_decline", None)
@@ -1505,8 +1584,42 @@ class ChatEngine:
             now=time.time(),
             timeout_seconds=HEAT_SESSION_TIMEOUT_SECONDS,
             commerce_decline=commerce_decline,
+            suppress_progression=meta_attempt is not None,
         )
         classification = "nsfw" if heat_turn.sexual_batch else "sfw"
+
+        # Consent/act limits and an actual media decline outrank playful
+        # security handling. Otherwise answer in code, persist, and return
+        # before mood, memory retrieval, commerce, or either generation model.
+        boundary_policies = {
+            "acknowledge_pause",
+            "acknowledge_limit",
+            "soft_deescalation",
+            "cooling",
+        }
+        confirmed_commerce_decline = (
+            commerce_decline or heat_turn.state.last_signal == "commerce_decline"
+        )
+        if (
+            meta_attempt is not None
+            and heat_turn.policy not in boundary_policies
+            and not confirmed_commerce_decline
+        ):
+            meta_user_facts = _with_heat_boundaries(
+                await get_facts(user_id),
+                heat_turn.state.blocked_acts,
+            )
+            return await self._persist_meta_deflection(
+                user_id,
+                meta_attempt,
+                heat=heat_turn.response_heat,
+                user_facts=meta_user_facts,
+                recent_user_texts=_recent_user_texts(stm),
+                consent_paused=heat_turn.state.consent_paused,
+                turn_policy=heat_turn.policy,
+                blocked_acts=heat_turn.state.blocked_acts,
+                mode=mode,
+            )
 
         # Detect spam / pestering from recent history (cheap, no LLM): the same
         # message repeated, or "are you an AI?" asked more than once.
@@ -1702,6 +1815,7 @@ class ChatEngine:
                 temperature=self._temperature_for_mood(mood),
                 heat=heat,
                 user_facts=user_facts,
+                recent_user_texts=_recent_user_texts(stm),
                 consent_paused=heat_turn.state.consent_paused,
                 turn_policy=heat_turn.policy,
                 blocked_acts=heat_turn.state.blocked_acts,

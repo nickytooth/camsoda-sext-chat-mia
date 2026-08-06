@@ -88,6 +88,7 @@ async def track_heat_batch(
     now: float | None = None,
     timeout_seconds: int = 3600,
     commerce_decline: bool = False,
+    suppress_progression: bool = False,
 ) -> tuple["HeatTurnResult", int]:
     """Atomically claim and persist one processed chat batch.
 
@@ -136,6 +137,7 @@ async def track_heat_batch(
                 batch_number=batch_number,
                 timeout_seconds=timeout_seconds,
                 commerce_decline=commerce_decline,
+                suppress_progression=suppress_progression,
             )
             state = heat_turn.state
             await conn.execute(

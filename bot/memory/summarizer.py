@@ -9,6 +9,7 @@ import unicodedata
 from typing import Any
 
 from bot.config import STM_MAX_TURNS, STM_SUMMARIZE_BATCH, LTM_COMPACTION_THRESHOLD
+from bot.meta_guard import meta_control_message_indexes, neutralize_meta_control_messages
 from bot.memory.embeddings import embed_texts
 from bot.memory.ltm import (
     count_memories,
@@ -205,11 +206,39 @@ def _is_fiction_message(message: dict) -> bool:
     )
 
 
+def _meta_exchange_message_indexes(messages: list[dict]) -> set[int]:
+    """Return hostile user rows plus Mia's immediate deflection rows.
+
+    The assistant reply is useful for short-term conversational continuity, but
+    the prompt-injection episode itself is not a durable relationship thread.
+    Marking the complete exchange prevents a summary grounded only in Mia's
+    authored deflection from preserving it in long-term memory.
+    """
+
+    hostile_users = meta_control_message_indexes(messages)
+    indexes = set(hostile_users)
+    after_hostile_user = False
+    for index, message in enumerate(messages):
+        role = message.get("role")
+        if role == "user":
+            after_hostile_user = index in hostile_users
+        elif role == "assistant" and after_hostile_user:
+            indexes.add(index)
+        elif role not in {"assistant", "system"}:
+            after_hostile_user = False
+    return indexes
+
+
 def _format_messages_for_summary(messages: list[dict]) -> str:
     """Encode bounded source data as JSON, preserving IDs and roles."""
     records = []
-    for message in messages:
-        content, truncated = _bounded_untrusted_text(message.get("content"))
+    non_durable_indexes = _meta_exchange_message_indexes(messages)
+    neutralized = neutralize_meta_control_messages(messages)
+    for index, message in enumerate(neutralized):
+        value = message.get("content")
+        if index in non_durable_indexes and message.get("role") == "assistant":
+            value = "(in-character deflection omitted)"
+        content, truncated = _bounded_untrusted_text(value)
         records.append({
             "message_id": message.get("id"),
             "role": message.get("role"),
@@ -248,6 +277,11 @@ def _validate_summary_payload(
     }
     if not source_by_id:
         raise MemoryValidationError("summary has no valid source messages")
+    non_durable_meta_source_ids = {
+        source_messages[index]["id"]
+        for index in _meta_exchange_message_indexes(source_messages)
+        if type(source_messages[index].get("id")) is int
+    }
     # Empty arrays are a valid, useful result: the batch contains no durable
     # information.  The caller persists a non-destructive deferral marker so
     # later batches can advance while these source messages remain stored.
@@ -270,6 +304,8 @@ def _validate_summary_payload(
             max_ids=MAX_SUMMARY_SOURCE_IDS,
         )
         source_rows = [source_by_id[source_id] for source_id in source_ids]
+        if non_durable_meta_source_ids.intersection(source_ids):
+            continue
         fiction = any(_is_fiction_message(row) for row in source_rows)
 
         if category != "thread":
@@ -315,6 +351,8 @@ def _validate_summary_payload(
                 "facts must be grounded only in non-fiction user messages"
             )
         source_rows = [source_by_id[source_id] for source_id in source_ids]
+        if non_durable_meta_source_ids.intersection(source_ids):
+            continue
         if _is_temporary_commerce_record(f"{key} {value}", source_rows):
             continue
         if key in seen_fact_keys:
