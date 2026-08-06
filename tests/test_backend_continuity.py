@@ -1,7 +1,9 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from bot.chat_engine import ChatEngine, ChatResponse
+from bot.heat import HeatState, HeatTurnResult
 from bot.memory import db
 from bot.memory.db import SCHEMA
 from bot.moderation import regex_soft_trigger
@@ -97,6 +99,30 @@ def make_moderated_engine(
 
 
 class BatchContinuityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_clear_user_state_awaits_cancelled_batch_worker(self):
+        engine = make_engine()
+        started = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def worker():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finished.set()
+
+        task = asyncio.create_task(worker())
+        engine._batch_tasks[7] = task
+        engine._pending[7] = ["stale"]
+        await started.wait()
+
+        await engine.clear_user_state(7)
+
+        self.assertTrue(task.done())
+        self.assertTrue(finished.is_set())
+        self.assertNotIn(7, engine._pending)
+        self.assertNotIn(7, engine._batch_tasks)
+
     async def test_message_arriving_after_pop_is_freshly_debounced_and_drained(self):
         engine = make_engine()
         engine._pending[7] = ["first"]
@@ -106,7 +132,7 @@ class BatchContinuityTests(unittest.IsolatedAsyncioTestCase):
         processed = []
         delivered = []
 
-        async def process(user_id, text):
+        async def process(user_id, text, *, raw_texts=None):
             processed.append((user_id, text))
             if text == "first":
                 # This is the old race window: the first batch has already
@@ -181,6 +207,10 @@ class FallbackPersistenceTests(unittest.IsolatedAsyncioTestCase):
             patch("bot.chat_engine.get_recent_messages", new=AsyncMock(return_value=stm)),
             patch("bot.chat_engine.get_facts", new=AsyncMock(return_value=[])),
             patch("bot.chat_engine.get_user_name", new=AsyncMock(return_value=None)),
+            patch(
+                "bot.chat_engine.get_engagement_state",
+                new=AsyncMock(return_value={"heat_stage": "low", "heat_progress": 0}),
+            ),
             patch("bot.chat_engine.get_recent_by_category", new=AsyncMock(return_value=[])),
             patch(
                 "bot.chat_engine.build_prompt",
@@ -204,6 +234,10 @@ class FallbackPersistenceTests(unittest.IsolatedAsyncioTestCase):
         bad_item = {"id": "bad", "text": "as an AI i cannot comply"}
 
         with (
+            patch(
+                "bot.chat_engine.get_engagement_state",
+                new=AsyncMock(return_value={"heat_stage": "low", "heat_progress": 0}),
+            ),
             patch("bot.chat_engine.get_facts", new=AsyncMock(return_value=[])),
             patch("bot.chat_engine.get_user_name", new=AsyncMock(return_value=None)),
             patch("bot.chat_engine.get_recent_messages", new=AsyncMock(return_value=[])),
@@ -213,6 +247,39 @@ class FallbackPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(response, fallback)
         engine._persist_graceful_fallback.assert_awaited_once()
+
+    async def test_consent_pause_blocks_explicit_story_card(self):
+        engine = make_engine()
+        fallback = ChatResponse(messages=["okay, we'll stop"])
+        engine._persist_graceful_fallback = AsyncMock(return_value=fallback)
+
+        with (
+            patch(
+                "bot.chat_engine.get_engagement_state",
+                new=AsyncMock(
+                    return_value={
+                        "heat_stage": "low",
+                        "heat_progress": 0,
+                        "sexual_pause_active": True,
+                    }
+                ),
+            ),
+            patch("bot.chat_engine.get_facts", new=AsyncMock(return_value=[])),
+            patch("bot.chat_engine.pick_unshared", new=AsyncMock()) as pick,
+        ):
+            response = await engine.generate_card(13, "story")
+
+        self.assertIs(response, fallback)
+        pick.assert_not_awaited()
+        engine._persist_graceful_fallback.assert_awaited_once_with(
+            13,
+            heat="low",
+            user_facts=[],
+            consent_paused=True,
+            turn_policy="acknowledge_pause",
+            blocked_acts=(),
+            mode="sexting",
+        )
 
 
 class LifetimeArcTests(unittest.IsolatedAsyncioTestCase):
@@ -259,7 +326,20 @@ class LifetimeArcTests(unittest.IsolatedAsyncioTestCase):
                     ]
                 ),
             ),
-            patch("bot.chat_engine.track_message", new=AsyncMock()),
+            patch(
+                "bot.chat_engine.track_heat_batch",
+                new=AsyncMock(
+                    return_value=(
+                        HeatTurnResult(
+                            state=HeatState(last_batch=3),
+                            response_heat="low",
+                            policy="normal",
+                            sexual_batch=False,
+                        ),
+                        3,
+                    )
+                ),
+            ),
             patch("bot.chat_engine.get_time_period", return_value="bar_shift"),
             patch("bot.chat_engine.mood_for_message", return_value={"mood": "warm", "intensity": 1}),
             patch("bot.chat_engine.get_arc_event", get_arc_event),
@@ -369,6 +449,10 @@ class AsyncOutputModerationTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("bot.chat_engine.get_user_name", new=AsyncMock(return_value=None)),
             patch("bot.chat_engine.get_facts", new=AsyncMock(return_value=[])),
+            patch(
+                "bot.chat_engine.get_engagement_state",
+                new=AsyncMock(return_value={"heat_stage": "low", "heat_progress": 0}),
+            ),
         ):
             result = await engine.suggest_reply(31)
 

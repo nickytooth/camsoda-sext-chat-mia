@@ -3,6 +3,7 @@ from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
 from bot.chat_engine import ChatEngine, ChatResponse
+from bot.heat import HeatState, HeatTurnResult
 from bot.media_commerce import CommerceAction, CommerceDecision, MediaOffer
 from bot.memory.stm import add_message, replace_assistant_message
 from bot.output_guard import validate_mia_reply
@@ -274,26 +275,33 @@ class CommerceAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_non_offer_actions_never_attach_a_card(self):
-        service = type("Service", (), {})()
-        service.plan_commerce_turn = AsyncMock(
-            return_value={
-                "action": "react_to_decline",
-                "brief": "he said not now",
-                "offer": offer_payload(),
-            }
-        )
-        engine = make_engine(service)
+        for action in (
+            "react_to_decline",
+            "ask_media_confirmation",
+            "cancel_media_confirmation",
+            "media_request_unavailable",
+        ):
+            with self.subTest(action=action):
+                service = type("Service", (), {})()
+                service.plan_commerce_turn = AsyncMock(
+                    return_value={
+                        "action": action,
+                        "brief": "trusted text-only action",
+                        "offer": offer_payload(),
+                    }
+                )
+                engine = make_engine(service)
 
-        turn = await engine._plan_commerce_turn(
-            9,
-            "not now",
-            batch_number=9,
-            heat="low",
-            period="bar_shift",
-        )
+                turn = await engine._plan_commerce_turn(
+                    9,
+                    "not now",
+                    batch_number=9,
+                    heat="low",
+                    period="bar_shift",
+                )
 
-        self.assertEqual(turn.action, "react_to_decline")
-        self.assertIsNone(turn.media_offer)
+                self.assertEqual(turn.action, action)
+                self.assertIsNone(turn.media_offer)
 
     async def test_offer_fails_closed_if_price_or_safe_metadata_is_invalid(self):
         service = type("Service", (), {})()
@@ -429,7 +437,27 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "bot.chat_engine.get_recent_messages", new=AsyncMock(return_value=stm)
             ),
-            patch("bot.chat_engine.track_message", new=AsyncMock()),
+            patch(
+                "bot.chat_engine.track_heat_batch",
+                new=AsyncMock(
+                    return_value=(
+                        HeatTurnResult(
+                            state=HeatState(
+                                stage="rising",
+                                progress=1,
+                                last_sexual_at=1,
+                                updated_at=1,
+                                last_batch=8,
+                                last_signal="sexual",
+                            ),
+                            response_heat="rising",
+                            policy="normal",
+                            sexual_batch=True,
+                        ),
+                        8,
+                    )
+                ),
+            ),
             patch("bot.chat_engine.get_time_period", return_value="bar_shift"),
             patch(
                 "bot.chat_engine.mood_for_message",
@@ -498,6 +526,35 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(persist_index, finalize_index)
         self.assertEqual(response.commerce_action, "ask_permission_again")
+        self.assertIsNone(response.media_offer)
+
+    async def test_direct_confirmation_is_committed_after_text_and_has_no_card(self):
+        async def plan_confirmation(user_id, text, *, batch_number, heat, period):
+            self.events.append(("plan", batch_number, period))
+            return {
+                "action": "ask_media_confirmation",
+                "brief": "ask him whether he is sure",
+                "offer": None,
+            }
+
+        self.service.plan_commerce_turn = plan_confirmation
+        with ExitStack() as stack:
+            for turn_patch in self._patch_turn_dependencies(
+                generated="oh wow... you really want to cross that line?"
+            ):
+                stack.enter_context(turn_patch)
+            response = await self.engine._process_sexting(23, "send nude now")
+
+        persist_index = next(
+            index for index, event in enumerate(self.events) if event[0] == "persist"
+        )
+        finalize_index = next(
+            index
+            for index, event in enumerate(self.events)
+            if event[0] == "finalize_action"
+        )
+        self.assertLess(persist_index, finalize_index)
+        self.assertEqual(response.commerce_action, "ask_media_confirmation")
         self.assertIsNone(response.media_offer)
 
     async def test_failed_reask_state_is_replaced_before_delivery(self):

@@ -26,6 +26,7 @@ A web-based AI girlfriend **sexting** chat app. Features real-time WebSocket cha
 
 - **Always-open persona** — Grok is the primary reply model, with Gemini as a validated fallback. Mia is a single forward persona (`personas/mia.yaml`); there is no SFW/NSFW model switch.
 - **Message batching** — a debounce window collects the user's messages, then they are processed together.
+- **Persistent conversation heat** — one sexual processed batch starts a provocative, non-graphic rising phase; a second intensifies it and a third unlocks high/explicit output. Normal batches do not erase rising momentum, while timeout and consent boundaries cool it deterministically.
 - **Time-of-day awareness** (Miami timezone) colours her mood and location. Weather is optional (only if `OPENWEATHER_API_KEY` is set).
 - **Input moderation** — obvious violations are hard-blocked locally; every other input receives a strict, fail-closed Grok moderation check. The regex soft tier preserves a precise category when the moderator is unavailable.
 - **Output validation** — generated replies, fallback drafts, openings, and AI Help suggestions cross deterministic persona/heat/boundary checks plus semantic moderation before display.
@@ -163,6 +164,9 @@ Edit `.env`:
 | `R2_SIGNED_PHOTO_TTL_SECONDS` | | Full photo source lifetime (default `600`) |
 | `R2_SIGNED_VIDEO_TTL_SECONDS` | | Full video source lifetime (default `3600`) |
 | `R2_SIGNED_PREVIEW_TTL_SECONDS` | | Private teaser/poster source lifetime (default `3600`) |
+| `MEDIA_CONFIRMATION_TTL_SECONDS` | | Pending direct-media confirmation lifetime (default `600`) |
+| `MEDIA_CONFIRMATION_MAX_BATCH_GAP` | | Maximum processed batches allowed before a pending confirmation expires (default `4`) |
+| `MEDIA_CONFIRMATION_GRANT_SECONDS` | | Session confirmation reuse lifetime (default `3600`) |
 | `COMMERCE_DEV_RESET_ENABLED` | | Enables the destructive dev-only commerce reset (default `false`) |
 
 Frontend (optional, for non-local backends) — create `frontend/.env.local`:
@@ -291,9 +295,11 @@ User sends a text message (WebSocket)
 ```text
 Processed user batch
   -> deterministic media-intent aliases/tags
+  -> first direct request: persisted text-only confirmation question
+  -> affirmative/repeated request: consume normalized pending intent once
   -> batch/heat/snooze checks
   -> catalog planner (current location first, unlocked excluded)
-  -> one reserved database offer
+  -> one reserved database offer, or a trusted text-only unavailable action
   -> safe COMMERCE BRIEF for Mia (no key, URL, catalog or price)
   -> persisted teaser text + delivered offer
   -> structured WebSocket media card
@@ -303,7 +309,9 @@ Processed user batch
 
 Raw WebSocket messages do not drive sales timing. One completed debounce batch
 increments `engagement_state.total_messages` once, even if it contains hundreds
-of rapidly sent messages.
+of rapidly sent messages. A confirmed explicit direct request may select
+high-minimum inventory without mutating conversational Heat; generic and
+proactive requests continue to respect the durable Heat stage.
 
 ### Memory System
 
@@ -348,6 +356,7 @@ Tables are created on startup by `bot/memory/db.py` (`CREATE TABLE IF NOT EXISTS
 | `demo_wallets` | Internal-demo token balances |
 | `demo_token_transactions` | Idempotent credit/debit ledger |
 | `media_tag_affinity` | Soft preference scores learned from unlocks |
+| `media_request_confirmations` | Short-lived normalized direct request and session confirmation state |
 
 ---
 

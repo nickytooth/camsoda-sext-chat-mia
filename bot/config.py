@@ -60,6 +60,20 @@ MEDIA_HARD_DECLINE_SNOOZE_BATCHES = int(
     os.getenv("MEDIA_HARD_DECLINE_SNOOZE_BATCHES", "100")
 )
 
+# A direct visual request is confirmed in chat before a paywall card is
+# attached.  The pending request is deliberately short-lived, while a granted
+# confirmation remains valid for the current conversational session so Mia
+# does not repeat the same "are you sure?" beat on every request.
+MEDIA_CONFIRMATION_TTL_SECONDS = int(
+    os.getenv("MEDIA_CONFIRMATION_TTL_SECONDS", "600")
+)
+MEDIA_CONFIRMATION_MAX_BATCH_GAP = int(
+    os.getenv("MEDIA_CONFIRMATION_MAX_BATCH_GAP", "4")
+)
+MEDIA_CONFIRMATION_GRANT_SECONDS = int(
+    os.getenv("MEDIA_CONFIRMATION_GRANT_SECONDS", "3600")
+)
+
 # Cloudflare R2 credentials. Full objects belong in a private bucket. These
 # values are intentionally empty by default so local development can use a
 # delivery adapter without accidentally exposing a bucket.
@@ -103,6 +117,11 @@ SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
 # Sexting batching is a debounce: she replies this many seconds after the
 # user's LAST message; every new message resets the countdown.
 SEXTING_DEBOUNCE_SECONDS = float(os.getenv("SEXTING_DEBOUNCE_SECONDS", "5"))
+
+# A rising/high sexual session cools back to the normal flirty register when
+# the user has not sent another sexual processed batch for this long.  Normal
+# chat batches do not decrement the persistent rising state on their own.
+HEAT_SESSION_TIMEOUT_SECONDS = int(os.getenv("HEAT_SESSION_TIMEOUT_SECONDS", "3600"))
 
 # Max seconds to wait for a single LLM generation before treating it as a
 # failure and falling back. Prevents a hung provider request from freezing the

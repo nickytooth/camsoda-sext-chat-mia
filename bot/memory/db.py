@@ -93,6 +93,17 @@ ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS sales_reask_pending BOOLEA
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS sales_reask_asked_at_batch BIGINT;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_proactive_media_batch BIGINT;
 ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS last_generic_media_type TEXT;
+-- Conversation heat is a durable state machine.  It advances once per
+-- processed debounce batch (never once per raw message) and survives
+-- summarisation, reconnects and process restarts.
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS heat_stage TEXT NOT NULL DEFAULT 'low';
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS heat_progress INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS heat_last_sexual_at DOUBLE PRECISION DEFAULT 0;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS heat_updated_at DOUBLE PRECISION DEFAULT 0;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS heat_last_batch BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS heat_last_signal TEXT NOT NULL DEFAULT 'neutral';
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS sexual_pause_active BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE engagement_state ADD COLUMN IF NOT EXISTS heat_blocked_acts TEXT NOT NULL DEFAULT '[]';
 -- Safe one-time/backward-compatible lower-bound backfill. Existing deployments
 -- may already have summarized old message rows, so retain the larger historic
 -- batch counter; otherwise use the exact user rows that are still available.
@@ -170,6 +181,19 @@ CREATE TABLE IF NOT EXISTS media_tag_affinity (
     updated_at DOUBLE PRECISION NOT NULL,
     PRIMARY KEY (user_id, tag_group, tag_value)
 );
+-- Ephemeral but durable direct-request confirmation.  The LLM never owns this
+-- state: it receives only a trusted action after the backend has validated and
+-- normalized the requested media facets.
+CREATE TABLE IF NOT EXISTS media_request_confirmations (
+    user_id BIGINT PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'granted')),
+    requested_type TEXT CHECK (requested_type IN ('photo', 'video')),
+    tags_json TEXT NOT NULL DEFAULT '{}',
+    explicitness TEXT CHECK (explicitness IN ('tease', 'suggestive', 'nude', 'explicit')),
+    asked_at_batch BIGINT NOT NULL,
+    expires_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL
+);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_content_uniq ON shared_content(user_id, kind, item_id);
 CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_user_mode ON messages(user_id, mode);
@@ -201,6 +225,8 @@ CREATE INDEX IF NOT EXISTS idx_media_entitlements_user
     ON media_entitlements(user_id, unlocked_at DESC);
 CREATE INDEX IF NOT EXISTS idx_demo_token_transactions_user
     ON demo_token_transactions(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_request_confirmations_expiry
+    ON media_request_confirmations(expires_at);
 """
 
 _pool: asyncpg.Pool | None = None
@@ -272,6 +298,15 @@ async def get_connection() -> _ConnAdapter:
     pool = await _get_pool()
     raw = await pool.acquire()
     return _ConnAdapter(raw)
+
+
+async def close_pool() -> None:
+    """Close the shared pool (primarily for clean process/test shutdown)."""
+
+    global _pool
+    pool, _pool = _pool, None
+    if pool is not None:
+        await pool.close()
 
 
 async def init_db() -> None:

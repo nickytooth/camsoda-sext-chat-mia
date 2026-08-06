@@ -498,7 +498,7 @@ async def get_time_prompt(heat: str | None = None) -> str:
     """Prompt injection describing where Mia is (and, when the conversation is
     already hot, what she's craving).
 
-    `heat` mirrors the user's register (see chat_engine._conversation_heat).
+    `heat` mirrors the user's register (see the durable reducer in bot.heat).
     Explicit energy/cravings are included only at `high`; `None` is reserved
     for explicit card generation. Low, rising and cooling/medium turns remain
     free of scripted graphic pressure."""

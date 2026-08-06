@@ -76,3 +76,28 @@ items:
       outfit: [casual]
       vibe: [playful, teasing, risky]
       capture: [selfie, full_body]
+
+  - id: mia_private_nude_001
+    type: photo
+    status: active
+    full_key: premium/mia_private_nude_001.png
+    preview_key: previews/mia_private_nude_001.webp
+    poster_key: null
+    mime_type: image/png
+    aspect_ratio: 0.75
+    duration_seconds: null
+    sha256: "4444444444444444444444444444444444444444444444444444444444444444"
+    explicitness: nude
+    min_heat: high
+    presentation:
+      mode: past_only
+      periods: []
+      current_description: null
+      past_description: a private nude photo from her bedroom
+    tags:
+      location: [bedroom]
+      body_focus: [pussy, full_body]
+      activity: [selfie, posing]
+      outfit: [nude]
+      vibe: [teasing, intimate]
+      capture: [selfie, full_body]

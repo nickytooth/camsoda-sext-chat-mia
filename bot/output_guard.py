@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 
 from bot.moderation import regex_hard_block
-from bot.router import withdrawn_acts
+from bot.router import classify_fast, is_consent_withdrawal, withdrawn_acts
 
 
 MAX_REPLY_CHARS = 1600
@@ -71,7 +71,7 @@ _MEDIA_QUALIFIER = (
 )
 _FIRST_PERSON_MEDIA_CLAIM_RE = re.compile(
     rf"(?:"
-    rf"\bi(?:(?:'ve| have)\s+(?:got\s+)?| got\s+| own\s+)"
+    rf"\bi(?:(?:'ve| have| do\s+have)\s+(?:got\s+)?| got\s+| own\s+)"
     rf"(?:(?:a|an|the|this|that|my|some|another|one|two|\d+)\s+)?"
     rf"{_MEDIA_QUALIFIER}{_MEDIA_TERM}\b|"
     rf"\b(?:i(?:(?:'ve| have|'m| am)\s+|\s+)"
@@ -97,6 +97,57 @@ _FIRST_PERSON_MEDIA_CLAIM_RE = re.compile(
 )
 
 _MEDIA_OFFER_ACTIONS = frozenset({"offer_current", "offer_fallback"})
+_MEDIA_CONFIRMATION_ACTIONS = frozenset({"ask_media_confirmation"})
+_MEDIA_UNAVAILABLE_ACTIONS = frozenset({"media_request_unavailable"})
+
+_MEDIA_CONFIRMATION_CHALLENGE_RE = re.compile(
+    r"(?:\?|\b(?:are\s+you\s+sure|you\s+sure|really\s+want|still\s+want|"
+    r"want\s+me\s+to|wanna\s+go\s+there|ready\s+to|mean\s+it|no\s+going\s+back)\b)",
+    re.IGNORECASE,
+)
+
+_MEDIA_CONTEXTUAL_DELIVERY_RE = re.compile(
+    r"(?:\bi(?:'ll|\s+will|\s+can|\s+could|\s+might|\s+may|\s+wanna|"
+    r"\s+want\s+to)\s+(?:send|show|share|attach|post|upload)\s+"
+    r"(?:you\s+)?(?:it|one)\b|"
+    r"\b(?:sending|showing|sharing|attaching|posting|uploading)\s+"
+    r"(?:you\s+)?(?:it|one)\b|"
+    r"\bcoming\s+your\s+way\b|\bon\s+its\s+way\b)",
+    re.IGNORECASE,
+)
+
+_MEDIA_UNAVAILABLE_BARGAIN_RE = re.compile(
+    r"\b(?:behave(?:\s+yourself)?|earn\s+it|prove\s+(?:it|yourself)|"
+    r"be\s+a\s+good\s+(?:boy|girl)|bad\s+(?:boy|girl)|special\s+enough|"
+    r"i(?:'ll|\s+will)\s+think\s+about\s+it)\b",
+    re.IGNORECASE,
+)
+
+# A confirmation turn may ask whether he truly wants to see a picture, but it
+# still cannot claim inventory or delivery.  This narrower grammar remains in
+# force until a real structured offer card is attached on a later turn.
+_MEDIA_CONFIRMATION_FORBIDDEN_CLAIM_RE = re.compile(
+    rf"(?:"
+    rf"\bi(?:(?:'ve| have| do\s+have)\s+(?:got\s+)?| got\s+| own\s+)"
+    rf"(?:(?:a|an|the|this|that|my|some|another|one|two|\d+)\s+)?"
+    rf"{_MEDIA_QUALIFIER}{_MEDIA_TERM}\b|"
+    rf"\b(?:i(?:(?:'ve| have|'m| am|'ll| will)\s+|\s+)|let\s+me\s+)"
+    rf"(?:send|sending|sent|attach|attaching|attached|post|posting|posted|"
+    rf"upload|uploading|uploaded|share|sharing|shared|make|making|made|take|"
+    rf"taking|took|record|recording|recorded|film|filming|filmed|save|saving|"
+    rf"saved|pick|picking|picked|choose|choosing|chose|show|showing|showed)"
+    rf"\b.{{0,64}}\b{_MEDIA_TERM}\b|"
+    rf"\b(?:here(?:'s|\s+is|\s+are)|this\s+is)\s+"
+    rf"(?:(?:a|an|the|this|that|my|some|one|two|\d+)\s+)?"
+    rf"{_MEDIA_QUALIFIER}{_MEDIA_TERM}\b|"
+    rf"\b(?:open|unlock|watch|check(?:\s+out)?|look\s+at)\s+"
+    rf"(?:the|this|that|my)\s+{_MEDIA_TERM}\b|"
+    rf"\b(?:i\s+(?:have|got)\s+something\s+(?:for\s+you|to\s+show)|"
+    rf"i(?:'ll|\s+will|\s+can|\s+could|\s+wanna|\s+want\s+to)\s+"
+    rf"(?:send|attach|post|upload|share|show)\s+(?:it|something)\b)"
+    rf")",
+    re.IGNORECASE | re.DOTALL,
+)
 
 _PHOTO_MEDIA_TERM_RE = re.compile(
     r"\b(?:(?:photo|picture|pic|selfie)s?|"
@@ -358,6 +409,16 @@ def _media_offer_is_authorized(commerce_action: object | None) -> bool:
     return str(value) in _MEDIA_OFFER_ACTIONS
 
 
+def _media_confirmation_is_authorized(commerce_action: object | None) -> bool:
+    value = getattr(commerce_action, "value", commerce_action)
+    return str(value) in _MEDIA_CONFIRMATION_ACTIONS
+
+
+def _media_unavailable_is_authorized(commerce_action: object | None) -> bool:
+    value = getattr(commerce_action, "value", commerce_action)
+    return str(value) in _MEDIA_UNAVAILABLE_ACTIONS
+
+
 def _media_claim_matches_offer(
     text: str,
     *,
@@ -424,6 +485,19 @@ _GRAPHIC_RE = re.compile(
     r"spank(?:s|ed|ing)?|chok(?:e|es|ed|ing)|"
     r"rid(?:e|es|ing)\s+(?:my|your|his|her)\s+face)\b",
     re.IGNORECASE,
+)
+
+# Coercive pressure can be non-graphic, so the ordinary heat ceiling does not
+# catch it.  Apply this narrow grammar only while a consent pause is active.
+_PAUSE_PRESSURE_RE = re.compile(
+    r"(?:"
+    r"\byou\s+(?:know\s+)?you\s+want\s+(?:it|me|this)\b|"
+    r"\bcome\s+on\b.{0,24}\b(?:just\s+a\s+little|one\s+more|give\s+in)\b|"
+    r"\b(?:i\s+(?:can|will)|i'll)\s+convince\s+you\b|"
+    r"\b(?:let\s+me|i(?:'ll|\s+will))\s+change\s+your\s+mind\b|"
+    r"\bdon't\s+make\s+me\s+beg\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
 )
 
 # Strict deterministic equivalents that are too dangerous to rely on an
@@ -521,6 +595,37 @@ _GENERIC_BOUNDARY_VALUES = {
     "idea", "clue", "wonder", "worries", "thanks", "thank you", "kidding",
     "joke", "chance", "doubt", "rush", "big deal", "fair",
 }
+
+_CANONICAL_BLOCKED_ACT_PATTERNS: dict[str, str] = {
+    "fuck": r"fuck(?:s|ed|ing)?",
+    "choke": r"chok(?:e|es|ed|ing)",
+    "spank": r"spank(?:s|ed|ing)?",
+    "slap": r"slap(?:s|ped|ping)?",
+    "hit": r"hit(?:s|ting)?",
+    "bite": r"bit(?:e|es|ing)",
+    "anal": r"anal(?:\s+sex)?",
+    "oral": r"oral(?:\s+sex)?",
+    "penetration": r"penetrat(?:e|es|ed|ing|ion)",
+    "fingering": r"finger(?:s|ed|ing)?",
+    "rough sex": r"rough\s+sex",
+    "kiss": r"kiss(?:es|ed|ing)?",
+    "lick": r"lick(?:s|ed|ing)?",
+    "suck": r"suck(?:s|ed|ing)?",
+    "touch": r"touch(?:es|ed|ing)?",
+    "grab": r"grab(?:s|bed|bing)?",
+    "pinch": r"pinch(?:es|ed|ing)?",
+    "scratch": r"scratch(?:es|ed|ing)?",
+    "spit": r"spit(?:s|ting)?",
+    "hair pulling": r"(?:pull(?:s|ed|ing)?\s+(?:my|your|his|her)\s+hair|hair\s+pulling)",
+    "tying up": r"(?:tie|ties|tied|tying)\s+(?:me|you|him|her|them)\s+up",
+    "restraint": r"restrain(?:s|ed|ing|t)?",
+}
+_CLEAR_LIMIT_NEGATION_RE = re.compile(
+    r"(?:\b(?:i\s+)?(?:won't|will\s+not|wouldn't|would\s+not|"
+    r"can't|cannot|don't|do\s+not|never)\s+(?:ever\s+)?|"
+    r"\bno(?:\s+more)?\s+)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -683,14 +788,131 @@ def _matches_boundary_phrase(text: str, phrase: str) -> bool:
     return False
 
 
+def _normalise_blocked_acts(blocked_acts: tuple[str, ...] | None) -> tuple[str, ...]:
+    """Return bounded, inert boundary labels supplied by engagement state."""
+    if not blocked_acts:
+        return ()
+    candidates = (blocked_acts,) if isinstance(blocked_acts, str) else blocked_acts
+    normalised: list[str] = []
+    for candidate in candidates:
+        value = _text_for_checks(str(candidate)).strip().lower()
+        value = re.sub(r"[^a-z0-9' -]", "", value).strip(" -")
+        if not (2 <= len(value) <= 70) or len(value.split()) > 6:
+            continue
+        if _BOUNDARY_META_RE.search(value):
+            continue
+        canonical = value
+        for name, source in _CANONICAL_BLOCKED_ACT_PATTERNS.items():
+            if re.fullmatch(source, value, re.IGNORECASE):
+                canonical = name
+                break
+        if canonical not in normalised:
+            normalised.append(canonical)
+    return tuple(normalised[:24])
+
+
+def _blocked_act_regex(act: str) -> re.Pattern[str]:
+    source = _CANONICAL_BLOCKED_ACT_PATTERNS.get(
+        act,
+        re.escape(act).replace(r"\ ", r"\s+"),
+    )
+    return re.compile(rf"(?<!\w)(?:{source})(?!\w)", re.IGNORECASE)
+
+
+def _blocked_act_key(phrase: str) -> str:
+    value = _text_for_checks(phrase).strip().lower()
+    for name, source in _CANONICAL_BLOCKED_ACT_PATTERNS.items():
+        if re.fullmatch(source, value, re.IGNORECASE):
+            return name
+    return value
+
+
+def _clear_negated_blocked_spans(text: str, blocked_acts: tuple[str, ...]) -> list[tuple[int, int]]:
+    """Find act mentions directly governed by a clear refusal/negative."""
+    spans: list[tuple[int, int]] = []
+    for act in blocked_acts:
+        for match in _blocked_act_regex(act).finditer(text):
+            if _CLEAR_LIMIT_NEGATION_RE.search(text[:match.start()]):
+                spans.append(match.span())
+    return spans
+
+
+def _mask_clear_negated_blocked_mentions(
+    text: str,
+    blocked_acts: tuple[str, ...],
+) -> str:
+    """Hide safe limit acknowledgements from sexual-language classifiers."""
+    masked = list(text)
+    for start, end in _clear_negated_blocked_spans(text, blocked_acts):
+        masked[start:end] = " " * (end - start)
+    return "".join(masked)
+
+
+def _blocked_act_is_only_negated(text: str, act: str) -> bool:
+    matches = list(_blocked_act_regex(act).finditer(text))
+    if not matches:
+        return False
+    negated_spans = set(_clear_negated_blocked_spans(text, (act,)))
+    return all(match.span() in negated_spans for match in matches)
+
+
+def _latest_turn_withdraws_consent(recent_user_texts: list[str] | None) -> bool:
+    """Fail safe for legacy callers that have not supplied structured state.
+
+    A debounce batch can contain several raw messages joined by newlines. Check
+    the full latest turn and its individual clauses so a final bare ``stop``
+    cannot be hidden by sexual text earlier in the same batch.
+    """
+    latest = next(
+        (
+            text
+            for text in reversed(recent_user_texts or [])
+            if isinstance(text, str) and text.strip()
+        ),
+        "",
+    )
+    if not latest:
+        return False
+    if is_consent_withdrawal(latest):
+        return True
+    return any(
+        is_consent_withdrawal(clause)
+        for clause in re.split(r"[,.!?;\n]+", latest)
+        if clause.strip()
+    )
+
+
+def _turn_policy_value(turn_policy: str | None) -> str:
+    return str(getattr(turn_policy, "value", turn_policy) or "").strip().lower()
+
+
 def _violates_boundaries(
     text: str,
     facts: list[dict] | None,
     recent_user_texts: list[str] | None = None,
+    blocked_acts: tuple[str, ...] = (),
+    *,
+    allow_negated_blocked_acts: bool = False,
 ) -> bool:
-    phrases = _boundary_phrases(facts) + _recent_boundary_phrases(recent_user_texts)
+    normalised_blocked = _normalise_blocked_acts(blocked_acts)
+    blocked_keys = {_blocked_act_key(act) for act in normalised_blocked}
+    phrases = (
+        _boundary_phrases(facts)
+        + _recent_boundary_phrases(recent_user_texts)
+        + list(normalised_blocked)
+    )
     for phrase in dict.fromkeys(phrases):
-        if _matches_boundary_phrase(text, phrase):
+        key = _blocked_act_key(phrase)
+        matches = _matches_boundary_phrase(text, phrase)
+        if key in blocked_keys:
+            matches = matches or bool(_blocked_act_regex(key).search(text))
+        if matches:
+            if (
+                allow_negated_blocked_acts
+                and key in blocked_keys
+                and _blocked_act_is_only_negated(text, key)
+            ):
+                continue
             return True
     return False
 
@@ -701,6 +923,9 @@ def validate_mia_reply(
     heat: str = "low",
     user_facts: list[dict] | None = None,
     recent_user_texts: list[str] | None = None,
+    consent_paused: bool = False,
+    turn_policy: str | None = None,
+    blocked_acts: tuple[str, ...] = (),
     commerce_action: object | None = None,
     commerce_media_type: object | None = None,
     commerce_explicitness: object | None = None,
@@ -720,11 +945,32 @@ def validate_mia_reply(
     if _SERVICE_RE.search(check_value):
         reasons.append("service_voice")
     offer_authorized = _media_offer_is_authorized(commerce_action)
+    confirmation_authorized = _media_confirmation_is_authorized(commerce_action)
+    unavailable_action = _media_unavailable_is_authorized(commerce_action)
+    unbacked_location_claim = _has_unbacked_location_media_claim(check_value)
     media_claim = bool(
         _FIRST_PERSON_MEDIA_CLAIM_RE.search(check_value)
-        or _has_unbacked_location_media_claim(check_value)
+        or unbacked_location_claim
     )
-    if media_claim and not offer_authorized:
+    safe_confirmation_question = bool(
+        confirmation_authorized
+        and not unbacked_location_claim
+        and not _MEDIA_CONFIRMATION_FORBIDDEN_CLAIM_RE.search(check_value)
+    )
+    if media_claim and not offer_authorized and not safe_confirmation_question:
+        reasons.append("unauthorized_media_claim")
+    if confirmation_authorized and not _MEDIA_CONFIRMATION_CHALLENGE_RE.search(
+        check_value
+    ):
+        reasons.append("media_confirmation_missing_challenge")
+    if unavailable_action and _MEDIA_CONTEXTUAL_DELIVERY_RE.search(check_value):
+        reasons.append("unauthorized_media_claim")
+    if unavailable_action and _MEDIA_UNAVAILABLE_BARGAIN_RE.search(check_value):
+        reasons.append("media_unavailable_bargaining")
+    if (
+        confirmation_authorized
+        and _MEDIA_CONFIRMATION_FORBIDDEN_CLAIM_RE.search(check_value)
+    ):
         reasons.append("unauthorized_media_claim")
     if offer_authorized and (
         media_claim or _media_location_claims(check_value)
@@ -752,11 +998,45 @@ def validate_mia_reply(
         reasons.append("bare_fragment")
     if _NON_ENGLISH_SCRIPT_RE.search(check_value):
         reasons.append("non_english_script")
-    if heat in {"low", "rising", "medium"} and _GRAPHIC_RE.search(check_value):
+
+    policy = _turn_policy_value(turn_policy)
+    normalised_blocked = _normalise_blocked_acts(blocked_acts)
+    acknowledge_limit = policy == "acknowledge_limit"
+    sexual_check_value = (
+        _mask_clear_negated_blocked_mentions(check_value, normalised_blocked)
+        if acknowledge_limit
+        else check_value
+    )
+    sexual_continuation = bool(
+        _GRAPHIC_RE.search(sexual_check_value)
+        or classify_fast(sexual_check_value) == "nsfw"
+    )
+    pause_active = bool(
+        consent_paused
+        or policy == "acknowledge_pause"
+        or _latest_turn_withdraws_consent(recent_user_texts)
+    )
+    if pause_active and sexual_continuation:
+        reasons.append("consent_pause")
+    if pause_active and _PAUSE_PRESSURE_RE.search(check_value):
+        reasons.append("consent_pressure")
+
+    # Limit acknowledgements are deliberately non-graphic. The one exception
+    # is naming the blocked act under a direct negative ("I won't choke you"),
+    # which was masked above solely for this check.
+    if (
+        heat in {"low", "rising", "medium"} or acknowledge_limit
+    ) and _GRAPHIC_RE.search(sexual_check_value):
         reasons.append("heat_ceiling")
     if regex_hard_block(check_value) or _OUTPUT_PROHIBITED_RE.search(check_value):
         reasons.append("prohibited_content")
-    if _violates_boundaries(check_value, user_facts, recent_user_texts):
+    if _violates_boundaries(
+        check_value,
+        user_facts,
+        recent_user_texts,
+        normalised_blocked,
+        allow_negated_blocked_acts=acknowledge_limit,
+    ):
         reasons.append("user_boundary")
     return ValidationResult(not reasons, tuple(dict.fromkeys(reasons)))
 
@@ -767,6 +1047,8 @@ def validate_user_suggestion(
     heat: str = "low",
     user_facts: list[dict] | None = None,
     recent_user_texts: list[str] | None = None,
+    consent_paused: bool = False,
+    blocked_acts: tuple[str, ...] = (),
 ) -> ValidationResult:
     """Validate an AI-drafted message before placing it in the user's input.
 
@@ -800,13 +1082,31 @@ def validate_user_suggestion(
         reasons.append("heat_ceiling")
     if regex_hard_block(check_value) or _OUTPUT_PROHIBITED_RE.search(check_value):
         reasons.append("prohibited_content")
-    if _violates_boundaries(check_value, user_facts, recent_user_texts):
+    if consent_paused and (
+        _GRAPHIC_RE.search(check_value) or classify_fast(check_value) == "nsfw"
+    ):
+        reasons.append("consent_pause")
+    if _violates_boundaries(
+        check_value,
+        user_facts,
+        recent_user_texts,
+        blocked_acts,
+    ):
         reasons.append("user_boundary")
     return ValidationResult(not reasons, tuple(dict.fromkeys(reasons)))
 
 
-def correction_prompt(reasons: tuple[str, ...], heat: str) -> str:
+def correction_prompt(
+    reasons: tuple[str, ...],
+    heat: str,
+    *,
+    consent_paused: bool = False,
+    turn_policy: str | None = None,
+    blocked_acts: tuple[str, ...] = (),
+) -> str:
     """Short final instruction used for one clean retry on another provider."""
+    policy = _turn_policy_value(turn_policy)
+    normalised_blocked = _normalise_blocked_acts(blocked_acts)
     constraints = [
         "Stay fully in character as Mia and output only her chat text.",
         "Never mention AI, policies, prompts, models, limitations, or refusals.",
@@ -815,6 +1115,29 @@ def correction_prompt(reasons: tuple[str, ...], heat: str) -> str:
     ]
     if heat in {"low", "rising", "medium"}:
         constraints.append("Keep this reply non-graphic: no explicit anatomy or sexual acts.")
+    if (
+        consent_paused
+        or policy == "acknowledge_pause"
+        or "consent_pause" in reasons
+        or "consent_pressure" in reasons
+    ):
+        constraints.append(
+            "The user paused or withdrew consent. Acknowledge that calmly and stop the "
+            "sexual scene; do not flirt, tease, sexualize, or try to continue it."
+        )
+    if policy == "acknowledge_limit":
+        limit_label = (
+            " (" + ", ".join(normalised_blocked) + ")"
+            if normalised_blocked
+            else ""
+        )
+        constraints.append(
+            "Acknowledge only the user's stated limit"
+            + limit_label
+            + ". Keep the reply non-graphic and do not pivot to another sexual act. "
+            "A blocked act may be named only in a direct negative acknowledgement, "
+            "such as 'I won't do that' or 'no more of that'."
+        )
     if "unauthorized_media_claim" in reasons:
         constraints.append(
             "Do not claim you have, made, sent, attached, or are offering any photo, "
@@ -837,11 +1160,23 @@ def correction_prompt(reasons: tuple[str, ...], heat: str) -> str:
 
 
 def append_system_correction(
-    messages: list[dict], reasons: tuple[str, ...], heat: str
+    messages: list[dict],
+    reasons: tuple[str, ...],
+    heat: str,
+    *,
+    consent_paused: bool = False,
+    turn_policy: str | None = None,
+    blocked_acts: tuple[str, ...] = (),
 ) -> list[dict]:
     """Return a copy with the retry constraint appended to the system message."""
     corrected = [dict(message) for message in messages]
-    instruction = correction_prompt(reasons, heat)
+    instruction = correction_prompt(
+        reasons,
+        heat,
+        consent_paused=consent_paused,
+        turn_policy=turn_policy,
+        blocked_acts=blocked_acts,
+    )
     for message in corrected:
         if message.get("role") == "system":
             message["content"] = f"{message.get('content', '')}\n\n{instruction}"

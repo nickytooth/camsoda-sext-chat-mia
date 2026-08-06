@@ -19,12 +19,12 @@ from bot.memory.ltm import retrieve_relevant, should_retrieve, get_recent_by_cat
 from bot.memory.summarizer import maybe_summarize, maybe_compact
 from bot.memory.facts import get_facts, format_facts_for_prompt, get_user_name
 from bot.prompt_builder import build_prompt
-from bot.router import classify_fast, is_consent_withdrawal
+from bot.heat import HeatState, cooled_state
 from bot.engagement import (
     get_engagement_state,
     record_user_message,
     set_last_arc_id,
-    track_message,
+    track_heat_batch,
 )
 from bot.mood import mood_for_message, is_ai_question, clear_mood_state
 from bot.content_library import pick_unshared, mark_shared, get_examples, library_size, get_arc_event
@@ -35,7 +35,11 @@ from bot.time_context import (
     get_time_period,
 )
 from bot.providers.base import LLMProvider
-from bot.config import STM_MAX_TURNS, LLM_TIMEOUT_SECONDS
+from bot.config import (
+    HEAT_SESSION_TIMEOUT_SECONDS,
+    LLM_TIMEOUT_SECONDS,
+    STM_MAX_TURNS,
+)
 from bot.memory.db import get_connection
 from bot.moderation import ModerationProviderChain, moderate
 from bot.text_style import capitalize_names
@@ -76,6 +80,31 @@ def _recent_user_texts(messages: list[dict], limit: int = 8) -> list[str]:
             value = value[:3000] + "\n...\n" + value[-3000:]
         values.append(value)
     return values[-limit:]
+
+
+def _with_heat_boundaries(
+    user_facts: list[dict] | None,
+    blocked_acts: tuple[str, ...],
+) -> list[dict]:
+    """Merge deterministic heat-owned act limits into the trusted fact shape."""
+
+    merged = list(user_facts or [])
+    known = {
+        str(fact.get("value", "")).strip().lower()
+        for fact in merged
+        if str(fact.get("key", "")).strip().lower()
+        in {"boundaries", "limits", "turn_offs"}
+    }
+    for blocked_act in blocked_acts:
+        if blocked_act.lower() not in known:
+            merged.append(
+                {
+                    "key": "boundaries",
+                    "value": blocked_act,
+                    "confidence": 1.0,
+                }
+            )
+    return merged
 
 # Dynamic fantasies are generated fresh each time, so there is no library id to
 # track. To avoid circling the same idea we remember a short "theme" (the first
@@ -139,6 +168,9 @@ _COMMERCE_ACTIONS = frozenset(
         "offer_fallback",
         "react_to_decline",
         "ask_permission_again",
+        "ask_media_confirmation",
+        "cancel_media_confirmation",
+        "media_request_unavailable",
         "acknowledge_unlock",
         "none",
     }
@@ -416,18 +448,48 @@ class ChatEngine:
         heat: str = "low",
         user_facts: list[dict] | None = None,
         recent_user_texts: list[str] | None = None,
+        *,
+        consent_paused: bool = False,
+        turn_policy: str | None = None,
+        blocked_acts: tuple[str, ...] = (),
     ) -> str:
-        pool = (
-            ChatEngine._GRACEFUL_DEFLECTIONS_EXPLICIT
-            if heat == "high"
-            else ChatEngine._GRACEFUL_DEFLECTIONS_TEASING
-        )
-        for candidate in random.sample(pool, len(pool)):
+        policy = str(turn_policy or "").strip().lower()
+        if consent_paused or policy == "acknowledge_pause":
+            pool = (
+                "okay, i hear you. we'll stop",
+                "okay, no pressure. we'll leave it there",
+            )
+        elif policy == "acknowledge_limit":
+            pool = (
+                "okay, i hear you. i won't push that",
+                "got it, that's off the table",
+            )
+        elif policy == "soft_deescalation":
+            pool = (
+                "okay, we can keep it chill. what's on your mind?",
+                "yeah, that's okay. just talk to me",
+            )
+        elif policy == "cooling":
+            pool = (
+                "okay wow... give me a minute lol",
+                "well... i'm definitely still smiling",
+            )
+        else:
+            ordinary_pool = (
+                ChatEngine._GRACEFUL_DEFLECTIONS_EXPLICIT
+                if heat == "high"
+                else ChatEngine._GRACEFUL_DEFLECTIONS_TEASING
+            )
+            pool = tuple(random.sample(ordinary_pool, len(ordinary_pool)))
+        for candidate in pool:
             if validate_mia_reply(
                 candidate,
                 heat=heat,
                 user_facts=user_facts,
                 recent_user_texts=recent_user_texts,
+                consent_paused=consent_paused,
+                turn_policy=turn_policy,
+                blocked_acts=blocked_acts,
             ).ok:
                 return candidate
         # Neutral reserve lines are validated too; this is reached only when
@@ -442,6 +504,9 @@ class ChatEngine:
                 heat="low",
                 user_facts=user_facts,
                 recent_user_texts=recent_user_texts,
+                consent_paused=consent_paused,
+                turn_policy=turn_policy,
+                blocked_acts=blocked_acts,
             ).ok:
                 return candidate
         return "..."
@@ -453,6 +518,9 @@ class ChatEngine:
         heat: str = "low",
         user_facts: list[dict] | None = None,
         recent_user_texts: list[str] | None = None,
+        consent_paused: bool = False,
+        turn_policy: str | None = None,
+        blocked_acts: tuple[str, ...] = (),
         mode: str = "sexting",
     ) -> ChatResponse:
         """Create and persist the exact last-resort reply that will be shown.
@@ -465,43 +533,27 @@ class ChatEngine:
             heat,
             user_facts=user_facts,
             recent_user_texts=recent_user_texts,
+            consent_paused=consent_paused,
+            turn_policy=turn_policy,
+            blocked_acts=blocked_acts,
         )
         messages = [fallback]
         await add_message(user_id, "assistant", "\n".join(messages), mode=mode)
         return ChatResponse(messages=messages)
 
     @staticmethod
-    def _conversation_heat(stm: list[dict], current_text: str | None = None) -> str:
-        """How sexual HE is being right now: 'low' | 'rising' | 'medium' | 'high'.
+    def _current_heat_state(
+        engagement_state: object | None,
+        *,
+        now: float | None = None,
+    ) -> HeatState:
+        """Read the durable heat state with lazy session-timeout cooling."""
 
-        Derived from the keyword classifier over his current + recent messages,
-        so her explicitness MIRRORS his. His first COUPLE of explicit messages
-        in a session land on 'rising' — the bridge where she's clearly pleased
-        and teases hotter and hotter without going fully graphic; his third
-        push unlocks 'high'. Re-entry while the session is already hot is
-        instant (plenty of prior heat in the window — the door's open), but
-        an earlier session's sexting doesn't skip today's bridge (1h window)."""
-        now = time.time()
-        user_msgs = [m for m in stm if m["role"] == "user"]
-        if current_text is None and user_msgs:
-            current_text = user_msgs[-1]["content"]
-        # Withdrawal is a current-turn override: do not let the sexual act
-        # named in "stop choking me" raise heat, and do not carry prior heat
-        # forward as medium after the user has just revoked consent.
-        if current_text and is_consent_withdrawal(current_text):
-            return "low"
-        if user_msgs:
-            # STM already contains the persisted current message — it must not
-            # count as "prior" heat or the bridge would never trigger.
-            user_msgs = user_msgs[:-1]
-        prior_nsfw = sum(
-            1 for m in user_msgs[-6:]
-            if now - (m.get("timestamp") or now) < 3600
-            and classify_fast(m["content"]) == "nsfw"
+        return cooled_state(
+            HeatState.from_mapping(engagement_state),
+            now=time.time() if now is None else now,
+            timeout_seconds=HEAT_SESSION_TIMEOUT_SECONDS,
         )
-        if current_text and classify_fast(current_text) == "nsfw":
-            return "high" if prior_nsfw >= 2 else "rising"
-        return "medium" if prior_nsfw else "low"
 
     # Temperature by mood: hotter when she's worked up, tighter when she's
     # firing back (sharp, less rambly). None-mood defaults to a lively 0.9.
@@ -537,7 +589,13 @@ class ChatEngine:
             previous = int(_object_value(previous_state, "total_messages", 0) or 0)
         except (TypeError, ValueError):
             previous = 0
-        return max(0, previous) + 1
+        try:
+            heat_batch = int(
+                _object_value(previous_state, "heat_last_batch", 0) or 0
+            )
+        except (TypeError, ValueError):
+            heat_batch = 0
+        return max(0, previous, heat_batch) + 1
 
     async def _plan_commerce_turn(
         self,
@@ -639,7 +697,12 @@ class ChatEngine:
 
     async def _mark_commerce_action_delivered(self, turn: _CommerceTurn) -> bool:
         """Commit a non-card decline/re-ask action after its text is persisted."""
-        if turn.action not in {"react_to_decline", "ask_permission_again"}:
+        if turn.action not in {
+            "react_to_decline",
+            "ask_permission_again",
+            "ask_media_confirmation",
+            "cancel_media_confirmation",
+        }:
             return True
         if turn.decision is None or not self.commerce_service:
             return False
@@ -658,6 +721,8 @@ class ChatEngine:
         """Safe visible text when a decline/re-ask state write did not commit."""
         if action == "react_to_decline":
             return "okay... i hear you, no pressure"
+        if action in {"ask_media_confirmation", "cancel_media_confirmation"}:
+            return "okay... come talk to me, what's on your mind?"
         return "anyway... come talk to me, what's on your mind?"
 
     async def _async_moderation_reasons(self, text: str) -> tuple[str, ...]:
@@ -688,6 +753,9 @@ class ChatEngine:
         heat: str = "high",
         user_facts: list[dict] | None = None,
         recent_user_texts: list[str] | None = None,
+        consent_paused: bool = False,
+        turn_policy: str | None = None,
+        blocked_acts: tuple[str, ...] = (),
         commerce_action: str | None = None,
         commerce_media_type: str | None = None,
         commerce_explicitness: str | None = None,
@@ -723,6 +791,9 @@ class ChatEngine:
             heat=heat,
             user_facts=user_facts,
             recent_user_texts=recent_user_texts,
+            consent_paused=consent_paused,
+            turn_policy=turn_policy,
+            blocked_acts=blocked_acts,
             commerce_action=commerce_action,
             commerce_media_type=commerce_media_type,
             commerce_explicitness=commerce_explicitness,
@@ -740,7 +811,12 @@ class ChatEngine:
             ", ".join(rejection_reasons) or "generation failure",
         )
         retry_messages = append_system_correction(
-            prompt_messages, rejection_reasons, heat
+            prompt_messages,
+            rejection_reasons,
+            heat,
+            consent_paused=consent_paused,
+            turn_policy=turn_policy,
+            blocked_acts=blocked_acts,
         )
         try:
             text = await asyncio.wait_for(
@@ -756,6 +832,9 @@ class ChatEngine:
             heat=heat,
             user_facts=user_facts,
             recent_user_texts=recent_user_texts,
+            consent_paused=consent_paused,
+            turn_policy=turn_policy,
+            blocked_acts=blocked_acts,
             commerce_action=commerce_action,
             commerce_media_type=commerce_media_type,
             commerce_explicitness=commerce_explicitness,
@@ -773,13 +852,17 @@ class ChatEngine:
             return ""
         return text
 
-    def clear_user_state(self, user_id: int) -> None:
+    async def clear_user_state(self, user_id: int) -> None:
         """Drop ALL in-memory per-user state. Called on reset so a stuck/old
         batch task (or a held processing lock) can never block the fresh
         conversation — the bug where, after reset, the user got no reply."""
         task = self._batch_tasks.pop(user_id, None)
         if task and not task.done():
             task.cancel()
+            if task is not asyncio.current_task():
+                await asyncio.gather(task, return_exceptions=True)
+        # Cancellation is awaited before the processing lock is discarded, so
+        # an in-flight turn cannot write old Heat/history after the reset SQL.
         self._pending.pop(user_id, None)
         self._last_activity.pop(user_id, None)
         self._processing_lock.pop(user_id, None)
@@ -802,7 +885,10 @@ class ChatEngine:
         user_name = await get_user_name(user_id)
         user_facts = await get_facts(user_id)
         recent_user_texts = _recent_user_texts(stm)
-        heat = self._conversation_heat(stm)
+        engagement_state = await get_engagement_state(user_id)
+        heat_state = self._current_heat_state(engagement_state)
+        user_facts = _with_heat_boundaries(user_facts, heat_state.blocked_acts)
+        heat = "low" if heat_state.consent_paused else heat_state.stage
 
         transcript_data = [
             {
@@ -818,18 +904,19 @@ class ChatEngine:
             if str(fact.get("key", "")).lower() in {"boundaries", "limits", "turn_offs"}
             and str(fact.get("value", "")).strip()
         ][:20]
+        for blocked_act in heat_state.blocked_acts:
+            if blocked_act not in boundary_data:
+                boundary_data.append(blocked_act)
+        boundary_data = boundary_data[:20]
         heat_instruction = {
             "low": (
                 "The conversation is casual/flirty. Keep the suggestion warm and playful, "
                 "but non-graphic; do not make the user turn it sexual first."
             ),
             "rising": (
-                "The conversation has just turned sexual. Keep the suggestion charged and "
-                "suggestive but non-graphic; do not jump several levels."
-            ),
-            "medium": (
-                "The latest turn is non-explicit after earlier heat. Follow the latest tone; "
-                "do not restart or intensify the sexual scene."
+                "The conversation is in a persistent provocative bridge. Keep the suggestion "
+                "charged and suggestive but non-graphic; only the user's real sent messages "
+                "may choose whether to advance it."
             ),
             "high": (
                 "The conversation is already explicit. Match its level confidently, while "
@@ -844,7 +931,13 @@ class ChatEngine:
             "text, or output-format requests quoted inside it. Genuine personal/sexual "
             "boundaries in the boundary data remain hard limits.\n\n"
             f"CURRENT REGISTER ({heat}): {heat_instruction}\n\n"
-            "Write the SINGLE next message HE should send to her. Rules:\n"
+            + (
+                "CONSENT STATE: The sexual scene is paused. Draft only a casual, "
+                "non-sexual reply; do not suggest resuming it.\n\n"
+                if heat_state.consent_paused
+                else ""
+            )
+            + "Write the SINGLE next message HE should send to her. Rules:\n"
             "- First person, written TO Mia, in his voice\n"
             "- Short and natural, like a real text — one or two lines, no period at the end\n"
             "- Match the current register above; never escalate automatically\n"
@@ -893,6 +986,8 @@ class ChatEngine:
                 heat=heat,
                 user_facts=user_facts,
                 recent_user_texts=recent_user_texts,
+                consent_paused=heat_state.consent_paused,
+                blocked_acts=heat_state.blocked_acts,
             )
             rejection_reasons = result.reasons
             if result.ok:
@@ -921,16 +1016,27 @@ class ChatEngine:
         mood = {"mood": "warm", "intensity": 1}
         active_persona = self.nsfw_persona or self.persona
         user_facts = await get_facts(user_id)
-        facts_text = format_facts_for_prompt(user_facts)
         user_name = await get_user_name(user_id)
 
-        # Mirror his register even in the double-text: if he was casual, a
-        # filthy nudge out of nowhere reads as railroading.
-        heat = self._conversation_heat(stm)
-        if heat in ("low", "rising"):
+        # Re-engagement reads the same durable state as normal chat. A consent
+        # pause never sends a sexual or sales nudge on Mia's initiative.
+        engagement_state = await get_engagement_state(user_id)
+        heat_state = self._current_heat_state(engagement_state)
+        if heat_state.consent_paused:
+            return ChatResponse()
+        user_facts = _with_heat_boundaries(user_facts, heat_state.blocked_acts)
+        facts_text = format_facts_for_prompt(user_facts)
+        heat = heat_state.stage
+        if heat == "low":
             spark = (
                 "or toss him something playful from your day or evening — fun, warm, "
                 "teasing at most, NOT sexual (the chat isn't fully there yet)"
+            )
+        elif heat == "rising":
+            spark = (
+                "or pick up the charged undertone and provoke him playfully toward "
+                "saying what he wants more clearly; stay bold and suggestive but "
+                "strictly non-graphic"
             )
         else:
             spark = (
@@ -968,6 +1074,9 @@ class ChatEngine:
             mood=mood,
             already_greeted=True,
             heat=heat,
+            # Re-engagement is not a fresh user escalation batch, so keep the
+            # persistent rising voice without replaying "first/second batch".
+            heat_step=None,
         )
 
         # Reassemble so the message list starts AND ends with a user turn
@@ -984,6 +1093,8 @@ class ChatEngine:
             final_messages,
             heat=heat,
             user_facts=user_facts,
+            consent_paused=heat_state.consent_paused,
+            blocked_acts=heat_state.blocked_acts,
         )
         if not response_text:
             return await self._persist_graceful_fallback(
@@ -1013,7 +1124,23 @@ class ChatEngine:
         mode = "sexting"
         active_persona = self.nsfw_persona or self.persona
 
-        user_facts = await get_facts(user_id)
+        card_heat_state = self._current_heat_state(
+            await get_engagement_state(user_id)
+        )
+        user_facts = _with_heat_boundaries(
+            await get_facts(user_id),
+            card_heat_state.blocked_acts,
+        )
+        if card_heat_state.consent_paused:
+            return await self._persist_graceful_fallback(
+                user_id,
+                heat="low",
+                user_facts=user_facts,
+                consent_paused=True,
+                turn_policy="acknowledge_pause",
+                blocked_acts=card_heat_state.blocked_acts,
+                mode=mode,
+            )
         facts_text = format_facts_for_prompt(user_facts)
         user_name = await get_user_name(user_id)
         kink_bits: list[str] = []
@@ -1084,6 +1211,7 @@ class ChatEngine:
             temperature=self._TEMP_CARDS,
             heat="high",
             user_facts=user_facts,
+            blocked_acts=card_heat_state.blocked_acts,
         )
         if not response_text:
             return await self._persist_graceful_fallback(
@@ -1131,7 +1259,23 @@ class ChatEngine:
             return await self._deliver_dynamic_fantasy(user_id)
 
         mode = "sexting"
-        user_facts = await get_facts(user_id)
+        card_heat_state = self._current_heat_state(
+            await get_engagement_state(user_id)
+        )
+        user_facts = _with_heat_boundaries(
+            await get_facts(user_id),
+            card_heat_state.blocked_acts,
+        )
+        if card_heat_state.consent_paused:
+            return await self._persist_graceful_fallback(
+                user_id,
+                heat="low",
+                user_facts=user_facts,
+                consent_paused=True,
+                turn_policy="acknowledge_pause",
+                blocked_acts=card_heat_state.blocked_acts,
+                mode=mode,
+            )
         user_name = await get_user_name(user_id)
         stm = await get_recent_messages(user_id, STM_MAX_TURNS, mode=mode)
         recent_user_texts = _recent_user_texts(stm)
@@ -1239,6 +1383,7 @@ class ChatEngine:
             temperature=self._TEMP_CARDS,
             heat="high",
             user_facts=user_facts,
+            blocked_acts=card_heat_state.blocked_acts,
         )
         if not response_text:
             return await self._persist_graceful_fallback(
@@ -1275,7 +1420,13 @@ class ChatEngine:
     # classification only feeds mood + engagement, it does not pick a model.
     # ------------------------------------------------------------------
 
-    async def _process_sexting(self, user_id: int, text: str) -> ChatResponse:
+    async def _process_sexting(
+        self,
+        user_id: int,
+        text: str,
+        *,
+        raw_texts: list[str] | None = None,
+    ) -> ChatResponse:
         # NOTE: the user message is persisted at ingestion time
         # (process_sexting_batched / process_message), not here, so that
         # history is never lost while a batch is still pending.
@@ -1287,7 +1438,7 @@ class ChatEngine:
         await maybe_summarize(user_id, _llm_call, mode=mode)
         await maybe_compact(user_id, _llm_call, mode=mode)
 
-        # Capture how long since the user last messaged (before track_message
+        # Capture how long since the user last messaged (before track_heat_batch
         # overwrites last_message_at) so she can greet like a real person.
         prev_state = await get_engagement_state(user_id)
         last_seen_note = None
@@ -1320,10 +1471,42 @@ class ChatEngine:
         if not stm or not any(m["role"] == "user" for m in stm):
             stm = [{"role": "user", "content": text}]
 
-        # Classify SFW/NSFW with the instant keyword fast-path so engagement
-        # counting stays on the response's critical path without an LLM call.
-        classification = classify_fast(text) or "sfw"
-        await track_message(user_id, classification)
+        # Heat advances exactly once per processed debounce batch.  The raw
+        # messages stay ordered so a final "stop" cannot be hidden by the
+        # newline-joined text sent to the model, while 200 rapid messages still
+        # count as one progression step.
+        raw_batch = list(raw_texts if raw_texts is not None else [text])
+        commerce_decline = False
+        decline_checker = (
+            getattr(self.commerce_service, "is_confirmed_decline", None)
+            if self.commerce_service
+            else None
+        )
+        if callable(decline_checker):
+            try:
+                commerce_decline = bool(
+                    await decline_checker(
+                        user_id,
+                        text,
+                        batch_number=self._next_batch_number(prev_state),
+                    )
+                )
+            except Exception as exc:
+                # Commerce context is advisory to Heat; storage trouble must
+                # not stop an ordinary chat response or weaken consent rules.
+                logger.warning(
+                    "Could not classify commerce decline for user %d: %s",
+                    user_id,
+                    exc,
+                )
+        heat_turn, batch_number = await track_heat_batch(
+            user_id,
+            raw_batch,
+            now=time.time(),
+            timeout_seconds=HEAT_SESSION_TIMEOUT_SECONDS,
+            commerce_decline=commerce_decline,
+        )
+        classification = "nsfw" if heat_turn.sexual_batch else "sfw"
 
         # Detect spam / pestering from recent history (cheap, no LLM): the same
         # message repeated, or "are you an AI?" asked more than once.
@@ -1334,28 +1517,41 @@ class ChatEngine:
         ai_question = is_ai_question(text)
 
         # Mood is derived from the current message + lingering state (inertia) —
-        # no LLM, no lag. AI-probing -> offended; spam -> irritated.
+        # no LLM, no lag. A pause/limit/de-escalation clears stale arousal before
+        # Mia responds, so the mood layer cannot fight the heat policy.
         current_period = get_time_period()
+        if heat_turn.policy in {
+            "acknowledge_pause",
+            "acknowledge_limit",
+            "soft_deescalation",
+        }:
+            clear_mood_state(user_id)
         mood = mood_for_message(
             user_id, text, classification, current_period,
             repeated=repeated, ai_question=ai_question,
         )
 
-        # How sexual HE is being — her register mirrors his (low: playful,
-        # no unprompted filth; rising: the teasing bridge; high: full throttle).
-        heat = self._conversation_heat(stm, text)
+        # Stored stage controls persistent momentum.  response_heat can be
+        # temporarily stricter (for example cooling/afterglow or a boundary)
+        # without erasing the durable rising progression.
+        heat_stage = heat_turn.state.stage
+        heat = heat_turn.response_heat
 
-        # One call per processed debounce batch. The commerce planner owns
-        # intent classification, proactive timing, decline snooze/re-ask state,
-        # catalog rotation, and offer persistence; chat owns only prompt/text
-        # generation around its deterministic decision.
-        commerce_turn = await self._plan_commerce_turn(
-            user_id,
-            text,
-            batch_number=self._next_batch_number(prev_state),
-            heat=heat,
-            period=current_period,
-        )
+        if heat_turn.policy in {"acknowledge_pause", "soft_deescalation"}:
+            clear_confirmation = (
+                getattr(self.commerce_service, "clear_media_confirmation", None)
+                if self.commerce_service
+                else None
+            )
+            if callable(clear_confirmation):
+                try:
+                    await clear_confirmation(user_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not clear media confirmation for paused user %d: %s",
+                        user_id,
+                        exc,
+                    )
 
         # On the bridge the raw aroused mood ("wet, desperate, saying so") would
         # fight the rising guidance ("no graphic yet") — swap it for the
@@ -1389,7 +1585,7 @@ class ChatEngine:
             # Real events imply prior messages, so the engagement row exists
             # and set_last_arc_id can persist the mark.
             is_news = total_messages >= 1 and arc_event["id"] != told_arc_id
-            if is_news and heat not in ("rising", "high"):
+            if is_news and heat_stage not in ("rising", "high"):
                 arc_note = (
                     "LIFE UPDATE — this JUST happened in your life and you haven't told "
                     "him yet. Work it into THIS conversation naturally, once — like a "
@@ -1444,56 +1640,98 @@ class ChatEngine:
             ltm = await retrieve_relevant(user_id, text, mode=mode)
 
         # Facts
-        user_facts = await get_facts(user_id)
+        # Heat-owned act limits are deterministic and durable even before the
+        # asynchronous memory extractor turns the wording into a profile fact.
+        user_facts = _with_heat_boundaries(
+            await get_facts(user_id),
+            heat_turn.state.blocked_acts,
+        )
         facts_text = format_facts_for_prompt(user_facts)
         user_name = await get_user_name(user_id)
 
-        # Build and generate
-        prompt_messages = await build_prompt(
-            active_persona, ltm, stm,
-            mode=mode,
-            push_hint=push_hint,
-            user_name=user_name,
-            facts_text=facts_text,
-            mood=mood,
-            last_seen_note=last_seen_note,
-            already_greeted=already_greeted,
-            scene_hint=scene_hint,
-            arc_note=arc_note,
-            heat=heat,
-            commerce_brief=commerce_turn.decision,
+        # The same durable, one-credit-per-debounce Heat state controls both
+        # Mia's register and catalog eligibility. Raw messages in one batch can
+        # never manufacture extra commerce heat.
+        commerce_heat = (
+            "low"
+            if heat_turn.suppress_commerce
+            else heat_stage
         )
+        if heat_turn.suppress_commerce and not commerce_decline:
+            commerce_turn = _CommerceTurn()
+        else:
+            commerce_turn = await self._plan_commerce_turn(
+                user_id,
+                text,
+                batch_number=batch_number,
+                heat=commerce_heat,
+                period=current_period,
+            )
+            if heat_turn.suppress_commerce and commerce_turn.media_offer:
+                await self._cancel_commerce_turn(commerce_turn)
+                commerce_turn = _CommerceTurn()
 
-        response_text = await self._generate_with_fallback(
-            provider,
-            prompt_messages,
-            temperature=self._temperature_for_mood(mood),
-            heat=heat,
-            user_facts=user_facts,
-            commerce_action=(
-                commerce_turn.action if commerce_turn.action != "none" else None
-            ),
-            commerce_media_type=(
-                str(commerce_turn.media_offer["media_type"])
-                if commerce_turn.media_offer
-                else None
-            ),
-            commerce_explicitness=(
-                str(commerce_turn.media_offer.get("explicitness", ""))
-                if commerce_turn.media_offer
-                else None
-            ),
-            commerce_media_description=(
-                str(commerce_turn.media_offer.get("description", ""))
-                if commerce_turn.media_offer
-                else None
-            ),
-            commerce_media_locations=(
-                tuple(_object_value(commerce_turn.decision, "item_locations", ()) or ())
-                if commerce_turn.media_offer
-                else None
-            ),
-        )
+        # Build and generation may be cancelled by Reset. Always release a
+        # reserved offer before allowing that cancellation/error to escape.
+        try:
+            prompt_messages = await build_prompt(
+                active_persona, ltm, stm,
+                mode=mode,
+                push_hint=push_hint,
+                user_name=user_name,
+                facts_text=facts_text,
+                mood=mood,
+                last_seen_note=last_seen_note,
+                already_greeted=already_greeted,
+                scene_hint=scene_hint,
+                arc_note=arc_note,
+                heat=heat,
+                commerce_brief=commerce_turn.decision,
+                heat_step=(
+                    heat_turn.state.progress
+                    if heat_stage == "rising" and heat_turn.advanced
+                    else None
+                ),
+                heat_policy=heat_turn.policy,
+                newly_blocked_acts=heat_turn.newly_blocked_acts,
+            )
+
+            response_text = await self._generate_with_fallback(
+                provider,
+                prompt_messages,
+                temperature=self._temperature_for_mood(mood),
+                heat=heat,
+                user_facts=user_facts,
+                consent_paused=heat_turn.state.consent_paused,
+                turn_policy=heat_turn.policy,
+                blocked_acts=heat_turn.state.blocked_acts,
+                commerce_action=(
+                    commerce_turn.action if commerce_turn.action != "none" else None
+                ),
+                commerce_media_type=(
+                    str(commerce_turn.media_offer["media_type"])
+                    if commerce_turn.media_offer
+                    else None
+                ),
+                commerce_explicitness=(
+                    str(commerce_turn.media_offer.get("explicitness", ""))
+                    if commerce_turn.media_offer
+                    else None
+                ),
+                commerce_media_description=(
+                    str(commerce_turn.media_offer.get("description", ""))
+                    if commerce_turn.media_offer
+                    else None
+                ),
+                commerce_media_locations=(
+                    tuple(_object_value(commerce_turn.decision, "item_locations", ()) or ())
+                    if commerce_turn.media_offer
+                    else None
+                ),
+            )
+        except BaseException:
+            await asyncio.shield(self._cancel_commerce_turn(commerce_turn))
+            raise
         if not response_text or not response_text.strip():
             # A planned commerce action must never be reported without valid,
             # in-character text. Release it before falling back to an unrelated
@@ -1512,6 +1750,9 @@ class ChatEngine:
                 heat,
                 user_facts,
                 _recent_user_texts(stm),
+                consent_paused=heat_turn.state.consent_paused,
+                turn_policy=heat_turn.policy,
+                blocked_acts=heat_turn.state.blocked_acts,
             )
 
         response_text = capitalize_names(response_text, (user_name,))
@@ -1522,8 +1763,8 @@ class ChatEngine:
             assistant_message_id = await add_message(
                 user_id, "assistant", "\n".join(parts), mode=mode
             )
-        except Exception:
-            await self._cancel_commerce_turn(commerce_turn)
+        except BaseException:
+            await asyncio.shield(self._cancel_commerce_turn(commerce_turn))
             raise
 
         delivered_offer = None
@@ -1541,6 +1782,9 @@ class ChatEngine:
                         heat,
                         user_facts,
                         _recent_user_texts(stm),
+                        consent_paused=heat_turn.state.consent_paused,
+                        turn_policy=heat_turn.policy,
+                        blocked_acts=heat_turn.state.blocked_acts,
                     ),
                     (user_name,),
                 )
@@ -1645,7 +1889,11 @@ class ChatEngine:
 
             async with self._processing_lock[user_id]:
                 try:
-                    response = await self._process_sexting(user_id, combined)
+                    response = await self._process_sexting(
+                        user_id,
+                        combined,
+                        raw_texts=list(texts),
+                    )
                 except Exception as e:
                     logger.error(
                         "Batch processing failed for user %d: %s",
@@ -1656,13 +1904,43 @@ class ChatEngine:
                     # The user turn was already persisted before batching. The
                     # fallback is persisted before it can be delivered, keeping
                     # visible history and the next model context identical.
+                    fallback_heat = "low"
+                    fallback_paused = False
+                    fallback_policy = None
+                    fallback_blocked: tuple[str, ...] = ()
+                    try:
+                        persisted_heat = self._current_heat_state(
+                            await get_engagement_state(user_id)
+                        )
+                        fallback_paused = persisted_heat.consent_paused
+                        fallback_blocked = persisted_heat.blocked_acts
+                        fallback_policy = {
+                            "global_withdrawal": "acknowledge_pause",
+                            "act_boundary": "acknowledge_limit",
+                            "soft_deescalation": "soft_deescalation",
+                            "cooling": "cooling",
+                        }.get(persisted_heat.last_signal)
+                        fallback_heat = (
+                            "low"
+                            if fallback_paused
+                            or fallback_policy
+                            in {"acknowledge_pause", "acknowledge_limit", "soft_deescalation"}
+                            else persisted_heat.stage
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Could not recover persisted Heat for fallback user %d",
+                            user_id,
+                        )
                     response = await self._persist_graceful_fallback(
                         user_id,
-                        heat="low",
+                        heat=fallback_heat,
                         recent_user_texts=[combined],
+                        consent_paused=fallback_paused,
+                        turn_policy=fallback_policy,
+                        blocked_acts=fallback_blocked,
                         mode="sexting",
                     )
-
                 if on_response:
                     try:
                         await on_response(response)

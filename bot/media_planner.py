@@ -48,6 +48,7 @@ _REQUEST_CUES = (
     "could i have",
     "may i have",
     "want",
+    "wanna",
     "give me",
     "прати",
     "пратиш",
@@ -61,6 +62,17 @@ _REQUEST_CUES = (
 )
 
 _POLITE_REQUEST_WORDS = frozenset({"please", "pls", "моля"})
+
+_MEDIA_TYPE_PLURAL_ALIASES: Mapping[str, tuple[str, ...]] = {
+    "photo": ("photos", "pictures", "pics", "selfies"),
+    "video": ("videos", "clips", "vids"),
+}
+
+_INVENTORY_REQUEST_PREFIX_RE = re.compile(
+    r"^(?:do\s+you\s+(?:have|sell|offer)|have\s+you\s+got|"
+    r"you\s+got|got)\s+",
+    re.IGNORECASE,
+)
 
 _SOFT_DECLINES = (
     "not now",
@@ -121,6 +133,13 @@ _AFFIRMATIVES = frozenset(
         "yes please",
         "i do",
         "i want to",
+        "now",
+        "right now",
+        "do it",
+        "send it",
+        "show me",
+        "let me see",
+        "give it to me",
         "да",
         "да моля",
         "искам",
@@ -138,6 +157,17 @@ def _normalize(text: str) -> str:
 def _contains_phrase(text: str, phrase: str) -> bool:
     pattern = r"(?<!\w)" + re.escape(phrase.casefold()) + r"(?!\w)"
     return re.search(pattern, text, flags=re.UNICODE) is not None
+
+
+def _media_type_aliases(media_type: str) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                *MEDIA_TYPE_ALIASES[media_type],
+                *_MEDIA_TYPE_PLURAL_ALIASES.get(media_type, ()),
+            )
+        )
+    )
 
 
 def _generic_request_phrase(text: str) -> str:
@@ -168,7 +198,7 @@ def _structured_short_request(
     if requested_type is None:
         return False
     residual = text
-    phrases: list[str] = list(MEDIA_TYPE_ALIASES[requested_type])
+    phrases: list[str] = list(_media_type_aliases(requested_type))
     for group, values in parsed_tags.items():
         for value in values:
             phrases.extend(TAG_ALIASES[group][value])
@@ -186,8 +216,10 @@ def _structured_short_request(
         "a",
         "an",
         "another",
+        "any",
         "one",
         "more",
+        "some",
         "please",
         "your",
         "of",
@@ -213,6 +245,31 @@ def _structured_short_request(
         "зад",
     }
     return remaining.issubset(allowed)
+
+
+def _structured_inventory_request(
+    text: str,
+    *,
+    requested_type: str | None,
+    parsed_tags: Mapping[str, tuple[str, ...]],
+    explicitness: str | None,
+) -> bool:
+    """Recognize direct inventory questions without matching media stories.
+
+    The inventory grammar is deliberately anchored at the beginning. Ordinary
+    statements such as ``I watched a video`` may normalize the media type, but
+    they never become a commerce request.
+    """
+
+    remainder, replacements = _INVENTORY_REQUEST_PREFIX_RE.subn("", text, count=1)
+    if replacements != 1:
+        return False
+    return _structured_short_request(
+        remainder,
+        requested_type=requested_type,
+        parsed_tags=parsed_tags,
+        explicitness=explicitness,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,7 +300,8 @@ def classify_media_intent(text: str) -> MediaIntent:
         decline_kind = "soft"
 
     requested_types: list[str] = []
-    for media_type, aliases in MEDIA_TYPE_ALIASES.items():
+    for media_type in MEDIA_TYPE_ALIASES:
+        aliases = _media_type_aliases(media_type)
         if any(_contains_phrase(normalized, alias) for alias in aliases):
             requested_types.append(media_type)
     # If both are named, the last explicitly occurring type wins instead of
@@ -253,9 +311,13 @@ def classify_media_intent(text: str) -> MediaIntent:
         positions = {}
         for media_type in requested_types:
             positions[media_type] = max(
-                normalized.rfind(alias.casefold())
-                for alias in MEDIA_TYPE_ALIASES[media_type]
-                if alias.casefold() in normalized
+                match.start()
+                for alias in _media_type_aliases(media_type)
+                for match in re.finditer(
+                    r"(?<!\w)" + re.escape(alias.casefold()) + r"(?!\w)",
+                    normalized,
+                    flags=re.UNICODE,
+                )
             )
         requested_type = max(requested_types, key=lambda value: positions[value])
 
@@ -285,9 +347,15 @@ def classify_media_intent(text: str) -> MediaIntent:
         parsed_tags=parsed_tags,
         explicitness=explicitness,
     )
+    inventory_request = _structured_inventory_request(
+        normalized,
+        requested_type=requested_type,
+        parsed_tags=parsed_tags,
+        explicitness=explicitness,
+    )
     requested = generic or (
         has_cue and bool(requested_type or parsed_tags or explicitness)
-    ) or short_media_phrase
+    ) or short_media_phrase or inventory_request
 
     affirmative_text = normalized.strip(" .,!?")
     affirmative = affirmative_text in _AFFIRMATIVES
@@ -486,7 +554,7 @@ class CatalogPlanner:
             # All suitable new candidates are exhausted. Prefer an old exact
             # match, otherwise the closest old item of the requested type.
             def repeat_allowed(item: MediaItem) -> bool:
-                if trigger in {"direct", "permission_reask"}:
+                if trigger in {"direct", "confirmed_direct", "permission_reask"}:
                     return True
                 return (
                     batch_number - last_by_content.get(item.id, -10**9)

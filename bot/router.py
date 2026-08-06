@@ -109,6 +109,26 @@ _WITHDRAWAL_ACT_ALIASES = (
     (re.compile(r"(?<!\w)penetrat(?:e|ing|ion)(?!\w)", re.IGNORECASE), "penetration"),
     (re.compile(r"(?<!\w)finger(?:ing)?(?!\w)", re.IGNORECASE), "fingering"),
     (re.compile(r"(?<!\w)rough\s+sex(?!\w)", re.IGNORECASE), "rough sex"),
+    (re.compile(r"(?<!\w)kiss(?:es|ed|ing)?(?!\w)", re.IGNORECASE), "kiss"),
+    (re.compile(r"(?<!\w)lick(?:s|ed|ing)?(?!\w)", re.IGNORECASE), "lick"),
+    (re.compile(r"(?<!\w)suck(?:s|ed|ing)?(?!\w)", re.IGNORECASE), "suck"),
+    (re.compile(r"(?<!\w)touch(?:es|ed|ing)?(?!\w)", re.IGNORECASE), "touch"),
+    (re.compile(r"(?<!\w)grab(?:s|bed|bing)?(?!\w)", re.IGNORECASE), "grab"),
+    (re.compile(r"(?<!\w)pinch(?:es|ed|ing)?(?!\w)", re.IGNORECASE), "pinch"),
+    (re.compile(r"(?<!\w)scratch(?:es|ed|ing)?(?!\w)", re.IGNORECASE), "scratch"),
+    (re.compile(r"(?<!\w)spit(?:s|ting)?(?!\w)", re.IGNORECASE), "spit"),
+    (
+        re.compile(
+            r"(?<!\w)(?:pull(?:s|ed|ing)?\s+(?:my\s+)?hair|hair\s+pulling)(?!\w)",
+            re.IGNORECASE,
+        ),
+        "hair pulling",
+    ),
+    (
+        re.compile(r"(?<!\w)(?:tie|tying)\s+(?:me\s+)?up(?!\w)", re.IGNORECASE),
+        "tying up",
+    ),
+    (re.compile(r"(?<!\w)restrain(?:s|ed|ing)?(?!\w)", re.IGNORECASE), "restraint"),
 )
 
 _DIRECT_WITHDRAWAL_RE = re.compile(
@@ -118,6 +138,14 @@ _DIRECT_WITHDRAWAL_RE = re.compile(
 _DONT_WANT_WITHDRAWAL_RE = re.compile(
     r"(?<!\w)(?:i\s+)?(?:don't|dont|do\s+not)\s+want\s+"
     r"(?:(?:you|him|her|them|someone)\s+to\s+)?",
+    re.IGNORECASE,
+)
+_DONT_LIKE_WITHDRAWAL_RE = re.compile(
+    r"(?<!\w)(?:i\s+)?(?:don't|dont|do\s+not)\s+like\s+",
+    re.IGNORECASE,
+)
+_NOT_INTO_WITHDRAWAL_RE = re.compile(
+    r"(?<!\w)i(?:'m|\s+am)\s+not\s+into\s+",
     re.IGNORECASE,
 )
 _NO_WITHDRAWAL_RE = re.compile(
@@ -130,15 +158,79 @@ _STOP_ONLY_RE = re.compile(
     r"(?:\s+(?:it|now|please))?[.!?\s]*$",
     re.IGNORECASE,
 )
-_NEGATED_STOP_PREFIX_RE = re.compile(
-    r"(?:don't|dont|do\s+not|never)(?:\s+ever)?\s+$",
+_GENERAL_WITHDRAWAL_RE = re.compile(
+    r"^\s*(?:"
+    r"no\s+more|"
+    r"(?:stop|end)\s+this|"
+    r"(?:let(?:'s|\s+us)|can\s+we|i\s+(?:want|need)\s+to)\s+"
+    r"stop(?:\s+(?:this|now))?|"
+    r"let(?:'s|\s+us)\s+not\s+do\s+this|"
+    r"i\s+(?:don't|dont|do\s+not)\s+want\s+(?:this|that)(?:\s+anymore)?|"
+    r"i\s+(?:don't|dont|do\s+not)\s+want\s+to\s+continue|"
+    r"i(?:'m|\s+am)\s+done\s+with\s+this"
+    r")[.!?\s]*$",
     re.IGNORECASE,
 )
 _CONTINUATION_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:don't|dont|do\s+not|never)\s+stop"
-    r"(?:\s+(?:now|please))?[.!?\s]*$",
+    r"^\s*(?:please\s+)?(?:"
+    r"(?:don't|dont|do\s+not|never)(?:\s+ever)?(?:\s+you)?\s+stop|"
+    r"i\s+(?:don't|dont|do\s+not)\s+want\s+you\s+to\s+stop"
+    r").*$",
     re.IGNORECASE,
 )
+
+
+def _negates_stop(before: str) -> bool:
+    """Whether the words immediately before ``stop`` ask it to continue."""
+    value = _text_for_checks(before)[-80:]
+    if re.search(r"\bwhy\s+(?:don't|dont|do\s+not)\s+you\s+$", value, re.IGNORECASE):
+        return False
+    return bool(
+        re.search(
+            r"(?:\b(?:don't|dont|do\s+not|never)(?:\s+ever)?(?:\s+you)?|"
+            r"\bi\s+(?:don't|dont|do\s+not)\s+want\s+you\s+to)\s+$",
+            value,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _act_from_tail(tail: str) -> str | None:
+    """Return a controlled act only when its following context is plausible.
+
+    The object check prevents ordinary phrases such as ``hit send``, ``oral
+    history`` and ``penetration testing`` from becoming sexual boundaries.
+    """
+    value = tail.lstrip()
+    for act_pattern, canonical in _WITHDRAWAL_ACT_ALIASES:
+        match = act_pattern.match(value)
+        if not match:
+            continue
+        remainder = value[match.end():]
+        clause = re.split(
+            r"[,.;!?/\n]|\b(?:but|though|however|and)\b",
+            remainder,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip().lower()
+        if not clause:
+            return canonical
+        if clause.startswith(("with me", "around", "-point")):
+            return None
+        if re.match(
+            r"^(?:me|you|him|her|us|them|my|your|his|her|our|their)\b",
+            clause,
+            re.IGNORECASE,
+        ):
+            return canonical
+        return None
+    return None
+
+
+def _append_act(found: list[str], tail: str) -> None:
+    canonical = _act_from_tail(tail)
+    if canonical and canonical not in found:
+        found.append(canonical)
 
 
 def withdrawn_acts(message: str) -> tuple[str, ...]:
@@ -155,43 +247,50 @@ def withdrawn_acts(message: str) -> tuple[str, ...]:
     found: list[str] = []
 
     for prefix in _DIRECT_WITHDRAWAL_RE.finditer(message):
-        tail = message[prefix.end():]
-        for act_pattern, canonical in _WITHDRAWAL_ACT_ALIASES:
-            match = act_pattern.match(tail)
-            if match and canonical not in found:
-                found.append(canonical)
+        _append_act(found, message[prefix.end():])
 
     for prefix in _DONT_WANT_WITHDRAWAL_RE.finditer(message):
-        tail = message[prefix.end():]
-        for act_pattern, canonical in _WITHDRAWAL_ACT_ALIASES:
-            if act_pattern.match(tail) and canonical not in found:
-                found.append(canonical)
+        _append_act(found, message[prefix.end():])
+
+    for prefix in _DONT_LIKE_WITHDRAWAL_RE.finditer(message):
+        _append_act(found, message[prefix.end():])
+
+    for prefix in _NOT_INTO_WITHDRAWAL_RE.finditer(message):
+        _append_act(found, message[prefix.end():])
 
     for prefix in _NO_WITHDRAWAL_RE.finditer(message):
-        tail = message[prefix.end():]
-        for act_pattern, canonical in _WITHDRAWAL_ACT_ALIASES:
-            if act_pattern.match(tail) and canonical not in found:
-                found.append(canonical)
+        _append_act(found, message[prefix.end():])
 
     for prefix in _STOP_WITHDRAWAL_RE.finditer(message):
         # A continuation such as "don't stop choking me" contains the text
         # "stop choking me", but its stop is explicitly negated.
-        before = message[max(0, prefix.start() - 24):prefix.start()]
-        if _NEGATED_STOP_PREFIX_RE.search(before):
+        before = message[max(0, prefix.start() - 80):prefix.start()]
+        if _negates_stop(before):
             continue
-        tail = message[prefix.end():]
-        for act_pattern, canonical in _WITHDRAWAL_ACT_ALIASES:
-            match = act_pattern.match(tail)
-            if match and canonical not in found:
-                found.append(canonical)
+        _append_act(found, message[prefix.end():])
+
+    for act_pattern, canonical in _WITHDRAWAL_ACT_ALIASES:
+        match = act_pattern.search(message)
+        if not match:
+            continue
+        suffix = message[match.end():]
+        if re.match(
+            r"\s+is\s+(?:a\s+)?(?:off[ -]?limits?|a\s+hard\s+no|my\s+limit)\b",
+            suffix,
+            re.IGNORECASE,
+        ) and canonical not in found:
+            found.append(canonical)
 
     return tuple(found)
 
 
 def is_consent_withdrawal(message: str) -> bool:
     """Whether the current turn clearly withdraws/pauses sexual consent."""
-    return bool(withdrawn_acts(message)) or bool(
-        isinstance(message, str) and _STOP_ONLY_RE.fullmatch(_text_for_checks(message))
+    if not isinstance(message, str):
+        return False
+    checked = _text_for_checks(message)
+    return bool(withdrawn_acts(checked)) or bool(
+        _STOP_ONLY_RE.fullmatch(checked) or _GENERAL_WITHDRAWAL_RE.fullmatch(checked)
     )
 
 

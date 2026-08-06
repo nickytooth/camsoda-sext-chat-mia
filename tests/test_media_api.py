@@ -1,7 +1,7 @@
 import importlib
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import HTTPException, Response
 
@@ -144,6 +144,10 @@ class MediaApiContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_normal_chat_reset_preserves_commerce_and_batch_state(self):
         connection = AsyncMock()
+        transaction = AsyncMock()
+        transaction.__aenter__.return_value = None
+        transaction.__aexit__.return_value = False
+        connection.transaction = Mock(return_value=transaction)
         old_engine = server_app.engine
         server_app.engine = None
         try:
@@ -161,6 +165,7 @@ class MediaApiContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("DELETE FROM demo_wallets", sql)
         self.assertNotIn("DELETE FROM media_offers", sql)
         self.assertNotIn("DELETE FROM media_entitlements", sql)
+        self.assertIn("DELETE FROM media_request_confirmations", sql)
         self.assertIn("UPDATE engagement_state", sql)
         self.assertNotIn("total_messages =", sql)
 

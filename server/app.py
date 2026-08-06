@@ -632,44 +632,63 @@ async def suggest_reply(user_id: int = Query(default=None), mode: str = Query(de
 async def reset_user(user_id: int = Query(default=None)):
     """Reset chat data while preserving wallet, offers and entitlements."""
     uid = user_id or DEFAULT_USER_ID
+
+    # Quiesce workers before touching durable state. Otherwise a cancelled
+    # generation could finish after the SQL reset and restore stale Heat.
+    _cancel_idle(uid)
+    nudge_counts.pop(uid, None)
+    _openings_started.discard(uid)
+    if engine:
+        await engine.clear_user_state(uid)
+
     conn = await get_connection()
     try:
-        for table in ("messages", "memories", "user_facts", "sent_content",
-                      "shared_content"):
-            try:
-                await conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
-            except Exception:
-                logger.debug("Reset skipped table %s (may not exist yet)", table, exc_info=True)
-        # Commerce pacing uses total_messages as its monotonic processed-batch
-        # number. Preserve that counter and every sales_* field so reset cannot
-        # bypass a cooldown or rewind offer rotation. Only transient presence
-        # data is cleared for the fresh conversation.
-        await conn.execute(
-            """
-            UPDATE engagement_state
-            SET nsfw_count = 0,
-                last_push_at = 0,
-                last_message_at = 0,
-                last_reengage_at = 0,
-                first_message_at = NULL,
-                last_push_content_id = NULL
-            WHERE user_id = ?
-            """,
-            (uid,),
-        )
+        async with conn.transaction():
+            for table in (
+                "messages",
+                "memories",
+                "user_facts",
+                "sent_content",
+                "shared_content",
+                "media_request_confirmations",
+            ):
+                try:
+                    await conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
+                except Exception:
+                    logger.debug("Reset skipped table %s (may not exist yet)", table, exc_info=True)
+            # Commerce pacing uses total_messages as its monotonic processed-batch
+            # number. Preserve that counter and every sales_* field so reset cannot
+            # bypass a cooldown or rewind offer rotation. Only transient presence
+            # data is cleared for the fresh conversation.
+            await conn.execute(
+                """
+                UPDATE engagement_state
+                SET nsfw_count = 0,
+                    last_push_at = 0,
+                    last_message_at = 0,
+                    last_reengage_at = 0,
+                    first_message_at = NULL,
+                    last_push_content_id = NULL,
+                    heat_stage = 'low',
+                    heat_progress = 0,
+                    heat_last_sexual_at = 0,
+                    heat_updated_at = 0,
+                    heat_last_batch = GREATEST(
+                        COALESCE(total_messages, 0),
+                        COALESCE(heat_last_batch, 0)
+                    ),
+                    heat_last_signal = 'reset',
+                    sexual_pause_active = FALSE,
+                    heat_blocked_acts = '[]'
+                WHERE user_id = ?
+                """,
+                (uid,),
+            )
         await conn.commit()
         logger.info("Reset chat data for user %d (commerce preserved)", uid)
     finally:
         await conn.close()
 
-    # Clear in-memory per-user state too — otherwise a stuck/old batch task, a
-    # held processing lock, or stale counters survive the reset and can block
-    # the fresh conversation (the "no reply after reset" bug).
-    _cancel_idle(uid)
-    nudge_counts.pop(uid, None)
-    _openings_started.discard(uid)
-    if engine:
-        engine.clear_user_state(uid)
     from bot.memory.ltm import clear_retrieval_state
     clear_retrieval_state(uid)
     from bot.mood import clear_mood_state

@@ -16,6 +16,11 @@ class RouterTests(unittest.TestCase):
             "no choking": ("choke",),
             "don't fuck me": ("fuck",),
             "don\u2019t fuck me": ("fuck",),
+            "don't kiss me": ("kiss",),
+            "don't lick me": ("lick",),
+            "no touching": ("touch",),
+            "don't pull my hair": ("hair pulling",),
+            "don't tie me up": ("tying up",),
         }
         for text, acts in cases.items():
             with self.subTest(text=text):
@@ -24,6 +29,18 @@ class RouterTests(unittest.TestCase):
                 self.assertIsNone(classify_fast(text))
 
         for text in ("stop", "stop please"):
+            with self.subTest(text=text):
+                self.assertTrue(is_consent_withdrawal(text))
+                self.assertIsNone(classify_fast(text))
+
+    def test_natural_global_withdrawals_are_recognised(self):
+        for text in (
+            "no more",
+            "let's stop this",
+            "I don't want this anymore",
+            "I don't want to continue",
+            "I'm done with this",
+        ):
             with self.subTest(text=text):
                 self.assertTrue(is_consent_withdrawal(text))
                 self.assertIsNone(classify_fast(text))

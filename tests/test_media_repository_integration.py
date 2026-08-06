@@ -10,7 +10,7 @@ import time
 import unittest
 
 from bot.media_repository import MediaRepository, MediaUnavailableError
-from bot.memory.db import init_db
+from bot.memory.db import close_pool, init_db
 
 
 @unittest.skipUnless(
@@ -24,7 +24,10 @@ class MediaRepositoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.repository.reset_user_commerce(self.user_id)
 
     async def asyncTearDown(self):
-        await self.repository.reset_user_commerce(self.user_id)
+        try:
+            await self.repository.reset_user_commerce(self.user_id)
+        finally:
+            await close_pool()
 
     async def test_double_unlock_debits_once_and_photo_video_prices_are_snapshots(self):
         self.assertEqual((await self.repository.get_wallet(self.user_id)).balance, 1000)
@@ -72,6 +75,37 @@ class MediaRepositoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.repository.unlock_offer(self.user_id, video.offer_id, "video-click")
         self.assertEqual((await self.repository.get_wallet(self.user_id)).balance, 985)
         self.assertEqual(len(await self.repository.list_entitlements(self.user_id)), 2)
+
+    async def test_pending_media_confirmation_is_consumed_once(self):
+        now = time.time()
+        staged = await self.repository.stage_media_confirmation(
+            self.user_id,
+            requested_type="photo",
+            tags={"body_focus": ("pussy",)},
+            explicitness="nude",
+            asked_at_batch=1,
+            expires_at=now + 600,
+            now=now,
+        )
+        self.assertEqual(staged.status, "pending")
+
+        async def grant():
+            return await self.repository.grant_media_confirmation(
+                self.user_id,
+                batch_number=2,
+                max_batch_gap=4,
+                granted_until=now + 3600,
+                now=now + 1,
+            )
+
+        first, second = await asyncio.gather(grant(), grant())
+        self.assertEqual(sum(value is not None for value in (first, second)), 1)
+        persisted = await self.repository.get_media_confirmation(
+            self.user_id, now=now + 2
+        )
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.status, "granted")
+        self.assertEqual(persisted.tags["body_focus"], ("pussy",))
 
 
 if __name__ == "__main__":
