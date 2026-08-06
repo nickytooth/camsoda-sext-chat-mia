@@ -238,6 +238,42 @@ def _commerce_offer_trigger(brief: object) -> str:
     return trigger if trigger in _COMMERCE_OFFER_TRIGGERS else ""
 
 
+def _immediate_offer_opener_guidance(brief: object) -> str:
+    """Rotate direct-offer energy without exposing the offer id to the model."""
+
+    offer = _commerce_value(brief, "offer")
+    trigger = _commerce_offer_trigger(brief)
+    if trigger == "permission_reask":
+        return (
+            "He has already accepted your earlier permission check. Acknowledge that yes "
+            "with one warm, tempted statement and no question mark. Do not repeat the "
+            "boundary tease, ask whether he is sure, or make him confirm again."
+        )
+    try:
+        offer_id = int(_commerce_value(offer, "offer_id", 0) or 0)
+    except (TypeError, ValueError):
+        offer_id = 0
+
+    styles = (
+        "Use one playful rhetorical boundary question with exactly one question mark.",
+        "Use a surprised, teasing statement with no question mark that notices how little time he wastes.",
+        "Use one mock-disbelief question with exactly one question mark that reacts to how bold or specific he is.",
+        "Use a visibly tempted, slightly dangerous statement with no question mark that reacts to his nerve.",
+    )
+    style = styles[offer_id % len(styles)] if offer_id > 0 else (
+        "Choose exactly one natural style: either one rhetorical boundary question "
+        "or one surprised, teasing statement."
+    )
+    return (
+        "React spontaneously to how direct or bold his request is. "
+        f"{style} Use at most one question in total and never stack questions. "
+        "Vary the wording naturally instead of repeating a stock line. This reaction is "
+        "flavor, not a confirmation step: never ask whether you should send/show it, "
+        "never wait for another answer, and never make him say yes again. React to his "
+        "boldness rather than merely describing how ready or aroused your body is."
+    )
+
+
 def _trusted_commerce_block(brief: object | None) -> str | None:
     """Render the single server-authorised commerce action for this reply.
 
@@ -287,6 +323,7 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
 
     offer_trigger = _commerce_offer_trigger(brief)
     immediate_offer = offer_trigger in _IMMEDIATE_OFFER_TRIGGERS
+    immediate_opener_guidance = _immediate_offer_opener_guidance(brief)
     if action in {"offer_current", "offer_saved", "offer_fallback"}:
         # Production already supplies first-person copy. This second trust
         # boundary protects lightweight adapters and legacy mapping callers so
@@ -299,12 +336,10 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
         (
             "A real locked media card WILL be attached immediately after this text. This is "
             "an accepted immediate response to his direct or contextual visual request. "
-            "Write exactly ONE short text bubble: react with genuine surprise and visible "
-            "temptation, then use a brief rhetorical tease in the spirit of 'ohhh, you "
-            "really wanna cross that line?' and naturally introduce the exact selected item. "
-            "The tease is flavor, NOT a confirmation step: do not ask for permission, do not "
-            "wait for another answer, and do not imply the card will arrive later. Do not say "
-            "it is already unlocked or paid for."
+            "Write exactly ONE short text bubble. "
+            f"{immediate_opener_guidance} Naturally point to the attached selected item "
+            "without reciting its catalog description. Do not imply the card will arrive "
+            "later or say it is already unlocked or paid for."
         )
         if immediate_offer
         else (
@@ -318,8 +353,9 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
         (
             "A real locked saved media card WILL be attached immediately after this text. "
             "This exactly matches what he asked to see, but it is a saved item rather than "
-            "a fresh capture. Write exactly ONE short text bubble: react with genuine "
-            "temptation and present it confidently as something worth opening. Saved media "
+            "a fresh capture. Write exactly ONE short text bubble. "
+            f"{immediate_opener_guidance} Present the card confidently as something worth "
+            "opening. Saved media "
             "is a feature, not an apology or a compromise. You do not need to mention that "
             "it was saved, its location, or a special occasion. Do not echo the catalog-like "
             "description as a label. Vary the tease naturally; avoid stock phrases such as "
@@ -341,10 +377,8 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
         (
             "A real locked alternative media card WILL be attached immediately after this "
             "text. This is an accepted immediate response to his direct or contextual visual "
-            "request. Write exactly TWO short text bubbles. Bubble 1 reacts with genuine "
-            "surprise and visible temptation and uses one brief rhetorical tease in the "
-            "spirit of 'ohhh, you really wanna cross that line?' The tease is flavor, NOT a "
-            "confirmation step: do not ask for permission and do not wait for another answer. "
+            "request. Write exactly TWO short text bubbles. Bubble 1 is one short opener: "
+            f"{immediate_opener_guidance} "
             "Bubble 2 acknowledges only the one human-relevant mismatch described by the "
             "structured fallback facts, then confidently pivots to the real card. Treat "
             "current_context as a factual constraint, NOT a line to quote. Paraphrase it in "
@@ -358,7 +392,7 @@ def _trusted_commerce_block(brief: object | None) -> str | None:
             "difference is the actual fallback. Use "
             "only the supplied reason: never invent Tyler, a friend, customers, coworkers, "
             "or any other person. Do not pretend the card was captured right now, and do not "
-            "imply it will arrive later."
+            "imply it will arrive later. Bubble 2 contains no question."
         )
         if immediate_offer
         else (

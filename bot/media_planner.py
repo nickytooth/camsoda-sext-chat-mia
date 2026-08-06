@@ -131,6 +131,17 @@ _CURRENT_REFINEMENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SUBJECTLESS_VISUAL_DESIRE_RE = re.compile(
+    r"^(?:please\s+)?(?:wanna|want\s+to)\s+see\s+"
+    r"(?P<target>.+)$",
+    re.IGNORECASE,
+)
+
+_SUBJECTLESS_VISUAL_DESIRE_SUFFIX_RE = re.compile(
+    r"\s+(?P<modifier>right\s+now|so\s+bad|rn|again|babe|baby|mia)$",
+    re.IGNORECASE,
+)
+
 _CURRENT_MEDIA_NOUN = r"(?:photo|picture|pic|selfie|video|clip|vid)"
 _CURRENT_MEDIA_QUALIFIER = (
     r"(?:nude|naked|explicit|sexy|private|teasing|hot|topless|pussy|ass|"
@@ -340,6 +351,8 @@ def _looks_reported_quoted_or_past(text: str) -> bool:
     if _REPORTED_OR_PAST_RE.search(text) or _REPORTING_BEFORE_COMMAND_RE.search(text):
         return True
     stripped = text.strip()
+    if re.match(r"^>+\s*", stripped):
+        return True
     if (
         len(stripped) >= 2
         and stripped[0] in "[("
@@ -355,7 +368,17 @@ def _looks_reported_quoted_or_past(text: str) -> bool:
             _contains_phrase(quoted_text, cue) for cue in _REQUEST_CUES
         )
         is_generic = _generic_request_phrase(quoted_text) in _GENERIC_REQUESTS
-        if is_generic or (has_request_words and _contains_visual_term(quoted_text)):
+        is_subjectless_visual_desire = bool(
+            _SUBJECTLESS_VISUAL_DESIRE_RE.fullmatch(
+                _generic_request_phrase(quoted_text)
+            )
+            and _contains_visual_term(quoted_text)
+        )
+        if (
+            is_generic
+            or is_subjectless_visual_desire
+            or (has_request_words and _contains_visual_term(quoted_text))
+        ):
             return True
     return False
 
@@ -501,6 +524,70 @@ def _structured_facet_refinement(
         "now",
     }
     return remaining.issubset(allowed)
+
+
+def _subjectless_visual_desire(
+    text: str,
+    *,
+    requested_type: str | None,
+    parsed_tags: Mapping[str, tuple[str, ...]],
+    explicitness: str | None,
+) -> tuple[bool, bool]:
+    """Recognize conversational ``wanna see your ...`` requests safely.
+
+    The omitted subject is normal chat English, but a bare ``wanna`` cue is
+    too broad: it would also promote ``do you wanna see my ass?`` and reported
+    speech.  This anchored grammar accepts only a Mia-owned visual target, a
+    controlled media noun, or ``you`` by itself. A small allowlist of trailing
+    chat modifiers is peeled independently of order; only ``right now``/``rn``
+    changes the request into a current-capture request.
+    """
+
+    match = _SUBJECTLESS_VISUAL_DESIRE_RE.fullmatch(text)
+    if match is None:
+        return False, False
+
+    target = _normalize(match.group("target")).strip(" .,!?")
+    modifiers: set[str] = set()
+    while suffix_match := _SUBJECTLESS_VISUAL_DESIRE_SUFFIX_RE.search(target):
+        modifiers.add(_normalize(suffix_match.group("modifier")))
+        target = target[: suffix_match.start()].rstrip()
+    requires_current = bool(modifiers.intersection({"right now", "rn"}))
+    if target in {"you", "you naked", "you nude"}:
+        return True, requires_current
+
+    visual_tags = {
+        group: values
+        for group, values in parsed_tags.items()
+        if group in {"body_focus", "outfit", "activity"}
+    }
+    if target.startswith("your "):
+        if not visual_tags and explicitness is None and requested_type is None:
+            return False, False
+        if requested_type is not None or explicitness in {"nude", "explicit"}:
+            requested = _structured_short_request(
+                target,
+                requested_type=requested_type,
+                parsed_tags=visual_tags,
+                explicitness=explicitness,
+            )
+        else:
+            requested = _structured_facet_refinement(
+                target,
+                parsed_tags=visual_tags,
+                explicitness=explicitness,
+            )
+        return requested, requires_current if requested else False
+
+    if requested_type is None and explicitness not in {"nude", "explicit"}:
+        return False, False
+    requested = _structured_short_request(
+        target,
+        requested_type=requested_type,
+        parsed_tags=visual_tags,
+        explicitness=explicitness,
+    )
+    return requested, requires_current if requested else False
 
 
 def _structured_inventory_request(
@@ -668,6 +755,12 @@ def _classify_media_intent_text(
         parsed_tags=parsed_tags,
         explicitness=explicitness,
     )
+    subjectless_desire, subjectless_desire_current = _subjectless_visual_desire(
+        generic_phrase,
+        requested_type=requested_type,
+        parsed_tags=parsed_tags,
+        explicitness=explicitness,
+    )
     facet_right_now = bool(
         facet_refinement and re.search(r"\bright\s+now\s*[.!?]*$", normalized)
     )
@@ -681,6 +774,7 @@ def _classify_media_intent_text(
     ) or (has_cue and visual_content) or short_media_phrase or inventory_request
     direct_candidate = direct_candidate or current_direct_candidate
     direct_candidate = direct_candidate or price_request
+    direct_candidate = direct_candidate or subjectless_desire
 
     contextual_form = _is_contextual_request_form(
         normalized,
@@ -697,6 +791,7 @@ def _classify_media_intent_text(
         or facet_right_now
         or (has_fresh_or_live and (direct_candidate or current_refinement))
         or current_refinement and generic_phrase == "right now"
+        or subjectless_desire_current
     )
 
     # A final refusal wins even when the same message began with an

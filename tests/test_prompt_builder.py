@@ -222,6 +222,7 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
                 "brief": "a playful mirror photo from behind the bar",
                 "offered_item_description": "a playful mirror photo from behind the bar",
                 "offer": {
+                    "offer_id": 40,
                     "content_id": "mia_bar_001",
                     "price_tokens": 5,
                     "full_key": "premium/mia_bar_001.jpg",
@@ -235,9 +236,11 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"action": "offer_current"', system)
         self.assertIn("a playful mirror photo from behind the bar", system)
         self.assertIn("exactly ONE short text bubble", system)
-        self.assertIn("genuine surprise and visible temptation", system)
-        self.assertIn("NOT a confirmation step", system)
-        self.assertIn("do not wait for another answer", system)
+        self.assertIn("React spontaneously to how direct or bold", system)
+        self.assertIn("one playful rhetorical boundary question", system)
+        self.assertIn("at most one question in total", system)
+        self.assertIn("not a confirmation step", system)
+        self.assertIn("never wait for another answer", system)
         self.assertIn("Never substitute a different room or location", system)
         self.assertNotIn("mia_bar_001", system)
         self.assertNotIn("premium/", system)
@@ -251,7 +254,7 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
                 "brief": "Offer this saved photo from her bed",
                 "offered_item_description": "a private photo she took from her bed",
                 "current_context": "Tyler is nearby but this must not be used",
-                "offer": {"trigger": "direct"},
+                "offer": {"offer_id": 41, "trigger": "direct"},
             },
         )
         system = messages[0]["content"]
@@ -270,6 +273,46 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("a private photo she took from her bed", system)
         self.assertNotIn("Tyler is nearby", system)
         self.assertIn("Do not give an excuse", system)
+        self.assertIn("surprised, teasing statement with no question mark", system)
+        self.assertIn("never make him say yes again", system)
+
+    async def test_direct_offer_opener_style_rotates_without_leaking_offer_id(self):
+        expected_styles = (
+            "one playful rhetorical boundary question",
+            "surprised, teasing statement with no question mark",
+            "one mock-disbelief question",
+            "visibly tempted, slightly dangerous statement",
+        )
+        for offer_id, expected_style in zip(range(40, 44), expected_styles):
+            with self.subTest(offer_id=offer_id):
+                _, messages = await self._build(
+                    heat="high",
+                    commerce_brief={
+                        "action": "offer_saved",
+                        "offered_item_description": "a private photo from her bed",
+                        "offer": {"offer_id": offer_id, "trigger": "direct"},
+                    },
+                )
+                system = messages[0]["content"]
+                self.assertIn(expected_style, system)
+                self.assertNotIn(f'"offer_id": {offer_id}', system)
+                self.assertNotIn("in the spirit of", system)
+
+    async def test_permission_reask_offer_acknowledges_yes_without_another_question(self):
+        _, messages = await self._build(
+            heat="high",
+            commerce_brief={
+                "action": "offer_saved",
+                "offered_item_description": "a private photo from her bed",
+                "offer": {"offer_id": 45, "trigger": "permission_reask"},
+            },
+        )
+        system = messages[0]["content"]
+
+        self.assertIn("already accepted your earlier permission check", system)
+        self.assertIn("no question mark", system)
+        self.assertIn("Do not repeat the boundary tease", system)
+        self.assertIn("make him confirm again", system)
 
     async def test_offer_description_normalizer_distinguishes_object_and_possessive_her(self):
         _, messages = await self._build(
@@ -402,9 +445,10 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"live_capture_blocker_kind": "work_crowd"', system)
         self.assertRegex(system, r"never describe(?:s)? the file's origin")
         self.assertIn("exactly TWO short text bubbles", system)
-        self.assertIn("Bubble 1 reacts with genuine surprise", system)
+        self.assertIn("Bubble 1 is one short opener", system)
+        self.assertIn("at most one question in total", system)
         self.assertIn("Bubble 2 acknowledges only", system)
-        self.assertIn("do not wait for another answer", system)
+        self.assertIn("never wait for another answer", system)
 
     async def test_storage_reference_in_curated_copy_is_dropped(self):
         for unsafe in (

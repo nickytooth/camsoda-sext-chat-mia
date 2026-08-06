@@ -225,6 +225,39 @@ _STACKED_MEDIA_LABEL_RE = re.compile(
     r"(?:photo|pic|picture|shot|selfie|video|clip)\b",
     re.IGNORECASE,
 )
+_DIRECT_OFFER_CONFIRMATION_RE = re.compile(
+    r"\b(?:should|shall)\s+i\s+(?:send|show|give|share|post)\b|"
+    r"\b(?:do\s+you\s+)?want\s+me\s+to\s+(?:send|show|give|share|post)\b|"
+    r"\bare\s+you\s+sure\b|"
+    r"\byou\s+sure\s*(?:[?!]+|$)|"
+    r"\b(?:do\s+)?you\s+(?:really\s+)?want\s+to\s+"
+    r"(?:see|open|watch)\s+(?:it|this|one)\s*\?|"
+    r"\bwant\s+(?:a\s+)?(?:look|peek)\s*\?|"
+    r"\b(?:do\s+you\s+)?(?:really\s+)?want\s+(?:it|this|one)\s*\?|"
+    r"\bwanna\s+see\s+(?:it|this|one)\s*\?|"
+    r"\bif\s+you(?:(?:'|’)re|\s+are)\s+sure\b|"
+    r"\bif\s+you\s+(?:really\s+)?want(?:\s+(?:it|this|one))?\b"
+    r"[^.!?]{0,48}\bi(?:(?:'|’)ll|\s+will)\s+(?:send|show|give|share|post)\b|"
+    r"\bi(?:(?:'|’)ll|\s+will)\s+(?:send|show|give|share|post)\b"
+    r"[^.!?]{0,48}\bif\s+you\b|"
+    r"\b(?:say\s+yes|say\s+the\s+word|tell\s+me\s+yes)\b|"
+    r"\bif\s+you\s+(?:still\s+)?want\s+(?:it|this)\b",
+    re.IGNORECASE,
+)
+_DIRECT_OFFER_BODY_ONLY_RE = re.compile(
+    r"\blook\s+how\s+(?:ready|wet|horny|turned\s+on)\s+i\s+am\b|"
+    r"\bmy\s+(?:ass|pussy|body)\s+is\s+(?:begging|ready|waiting)\b",
+    re.IGNORECASE,
+)
+_DIRECT_OFFER_DELAY_RE = re.compile(
+    r"\bwait\s+for\s+me\s+to\s+(?:send|show|give|share|post)\b|"
+    r"\b(?:give\s+me\s+)?(?:a|one)\s+(?:sec(?:ond)?|minute)\b"
+    r".{0,64}\bi(?:(?:'|’)ll|\s+will)\s+(?:send|show|give|share|post)\b|"
+    r"\bi(?:(?:'|’)ll|\s+will)\s+(?:send|show|give|share|post)\s+"
+    r"(?:it|this|one)\s+(?:later|in\s+(?:a|one)\s+(?:sec(?:ond)?|minute))\b|"
+    r"\b(?:send|show|give|share|post)\s+(?:it|this|one)\s+later\b",
+    re.IGNORECASE,
+)
 _NATURAL_MISMATCH_RE = re.compile(
     r"\b(?:not\s+(?:quite|exactly)|don(?:'|\u2019)t\s+have|do\s+not\s+have|"
     r"isn(?:'|\u2019)t\s+(?:quite|exactly)|different\s+(?:angle|shot)|"
@@ -2299,13 +2332,19 @@ class ChatEngine:
         if turn.action == "offer_saved":
             packed = cls._repack_to_n(text, 1)
             visible = (packed[:1] or [text.strip()])[0]
-            if cls._saved_offer_copy_is_safe(visible, turn):
+            if (
+                cls._saved_offer_copy_is_safe(visible, turn)
+                and cls._direct_offer_opener_is_safe(visible, turn)
+            ):
                 return [visible]
             return [cls._deterministic_saved_offer_copy(turn)]
 
         if turn.action == "offer_current":
             packed = cls._repack_to_n(text, 1)
-            return packed[:1] or [text.strip()]
+            visible = (packed[:1] or [text.strip()])[0]
+            if cls._direct_offer_opener_is_safe(visible, turn):
+                return [visible]
+            return [cls._deterministic_current_offer_copy(turn)]
 
         return cls._split_response(text, vary=True)
 
@@ -2642,6 +2681,63 @@ class ChatEngine:
             or _CURRENT_CAPTURE_EXCUSE_RE.search(text)
         )
 
+    @staticmethod
+    def _commerce_offer_trigger(turn: _CommerceTurn) -> str:
+        offer = _object_value(turn.decision, "offer")
+        trigger = str(_enum_value(_object_value(offer, "trigger", "")))
+        return trigger if trigger in {"direct", "permission_reask", "proactive"} else ""
+
+    @classmethod
+    def _direct_offer_opener_is_safe(
+        cls,
+        text: str,
+        turn: _CommerceTurn,
+    ) -> bool:
+        """Keep direct offer flavor brief, varied, and non-gating."""
+
+        if cls._commerce_offer_trigger(turn) not in {"direct", "permission_reask"}:
+            return True
+        trigger = cls._commerce_offer_trigger(turn)
+        visible = " ".join(str(text or "").split())
+        return bool(
+            visible
+            and visible.count("?") <= (0 if trigger == "permission_reask" else 1)
+            and not _DIRECT_OFFER_CONFIRMATION_RE.search(visible)
+            and not _DIRECT_OFFER_BODY_ONLY_RE.search(visible)
+            and not _DIRECT_OFFER_DELAY_RE.search(visible)
+        )
+
+    @classmethod
+    def _direct_offer_fallback_continuation_is_safe(
+        cls,
+        first: str,
+        second: str,
+        turn: _CommerceTurn,
+    ) -> bool:
+        """Keep fallback bubble two explanatory, never a second gate.
+
+        The first bubble owns the optional rhetorical question.  The second
+        bubble explains the grounded mismatch and attaches the already
+        authorised card, so a question there would either exceed the turn's
+        question budget or accidentally turn the offer back into a
+        confirmation flow.
+        """
+
+        trigger = cls._commerce_offer_trigger(turn)
+        if trigger not in {"direct", "permission_reask"}:
+            return True
+        first_visible = " ".join(str(first or "").split())
+        second_visible = " ".join(str(second or "").split())
+        question_limit = 0 if trigger == "permission_reask" else 1
+        return bool(
+            second_visible
+            and "?" not in second_visible
+            and first_visible.count("?") + second_visible.count("?")
+            <= question_limit
+            and not _DIRECT_OFFER_CONFIRMATION_RE.search(second_visible)
+            and not _DIRECT_OFFER_DELAY_RE.search(second_visible)
+        )
+
     @classmethod
     def _saved_offer_copy_is_safe(
         cls,
@@ -2870,25 +2966,46 @@ class ChatEngine:
         """Keep natural model copy; compose only when its meaning is unusable."""
 
         first = parts[0] if parts else ""
-        if not first or not cls._fallback_teaser_is_safe(first):
+        if (
+            not first
+            or not cls._fallback_teaser_is_safe(first)
+            or not cls._direct_offer_opener_is_safe(first, turn)
+        ):
             first = cls._deterministic_offer_lead(turn)
         second = parts[1] if len(parts) > 1 else ""
-        if cls._fallback_copy_is_natural(second, turn):
+        if (
+            cls._fallback_copy_is_natural(second, turn)
+            and cls._direct_offer_fallback_continuation_is_safe(
+                first,
+                second,
+                turn,
+            )
+        ):
             return [first, second]
         return [first, cls._deterministic_fallback_copy(turn)]
 
     @staticmethod
     def _deterministic_offer_lead(turn: _CommerceTurn) -> str:
         offer_id = int((turn.media_offer or {}).get("offer_id", 0) or 0)
+        if ChatEngine._commerce_offer_trigger(turn) == "permission_reask":
+            accepted = (
+                "mmh... that's what i wanted to hear 😈",
+                "good... then open this for me",
+                "there you go babe... don't say i didn't warn you 😈",
+            )
+            return accepted[offer_id % len(accepted)]
         leads = (
-            "ohhh... you really wanna go there? 😈",
-            "wow, straight to it huh? you're getting brave 😈",
-            "god... you really know what to ask for",
+            "ohhh... you really wanna cross that line? 😈",
+            "wow... you really don't waste time 😈",
+            "okay... straight to that huh? you're bold 😈",
+            "god... no hesitation from you at all 😈",
         )
         return leads[offer_id % len(leads)]
 
-    @staticmethod
-    def _deterministic_saved_offer_copy(turn: _CommerceTurn) -> str:
+    @classmethod
+    def _deterministic_saved_offer_copy(cls, turn: _CommerceTurn) -> str:
+        if cls._commerce_offer_trigger(turn) in {"direct", "permission_reask"}:
+            return cls._deterministic_offer_lead(turn)
         offer_id = int((turn.media_offer or {}).get("offer_id", 0) or 0)
         saved = (
             "ohhh... you picked the right thing to ask for 😈 open this",
@@ -2896,6 +3013,18 @@ class ChatEngine:
             "i've been waiting for an excuse to show you this 😈",
         )
         return saved[offer_id % len(saved)]
+
+    @classmethod
+    def _deterministic_current_offer_copy(cls, turn: _CommerceTurn) -> str:
+        if cls._commerce_offer_trigger(turn) in {"direct", "permission_reask"}:
+            return cls._deterministic_offer_lead(turn)
+        offer_id = int((turn.media_offer or {}).get("offer_id", 0) or 0)
+        proactive = (
+            "i've got something that's going to distract you 😈",
+            "you've been on my mind... so open this",
+            "this should make your night a little more interesting",
+        )
+        return proactive[offer_id % len(proactive)]
 
     @classmethod
     def _deterministic_commerce_copy(cls, turn: _CommerceTurn) -> str:
@@ -2909,12 +3038,7 @@ class ChatEngine:
             )
         if turn.action == "offer_saved":
             return cls._deterministic_saved_offer_copy(turn)
-        current = (
-            "ohhh... you really wanna go there? 😈 look what you talked me into",
-            "wow, okay... you're getting exactly what you asked for",
-            "god... open this before i change my mind 😈",
-        )
-        return current[offer_id % len(current)]
+        return cls._deterministic_current_offer_copy(turn)
 
     @classmethod
     def _force_two_offer_bubbles(cls, text: str) -> list[str]:
