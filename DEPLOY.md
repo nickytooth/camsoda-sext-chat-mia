@@ -36,9 +36,9 @@ Railway → **New → Database → PostgreSQL**. It exposes `DATABASE_URL` autom
 
 ### Private Cloudflare R2 media
 
-The checked-in runtime catalog is intentionally empty. Populate it only with
-distinct private-only assets; never reuse files from `frontend/public`, because
-those are served without an entitlement.
+The checked-in `library/media_catalog.yaml` contains the demo inventory. Full
+media bytes remain private in R2. Never reuse files from `frontend/public`,
+because those are served without an entitlement.
 
 Keep the bucket private. Generate derivatives, upload immutable objects and
 atomically build the catalog with `python scripts/media_pipeline.py publish`

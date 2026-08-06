@@ -35,7 +35,7 @@ if str(PROJECT_ROOT) not in sys.path:
 DEFAULT_MANIFEST = PROJECT_ROOT / ".private-media" / "manifest.yaml"
 DEFAULT_SOURCE_DIR = PROJECT_ROOT / ".private-media" / "originals"
 DEFAULT_BUILD_DIR = PROJECT_ROOT / ".media-build"
-DEFAULT_CATALOG = PROJECT_ROOT / ".private-media" / "media_catalog.yaml"
+DEFAULT_CATALOG = PROJECT_ROOT / "library" / "media_catalog.yaml"
 DEFAULT_PUBLIC_DIR = PROJECT_ROOT / "frontend" / "public"
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,79}$")
