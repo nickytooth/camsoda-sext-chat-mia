@@ -10,7 +10,7 @@ from bot.media_commerce import (
     _spoken_fallback_context,
     _spoken_item_description,
 )
-from bot.media_planner import classify_media_intent
+from bot.media_planner import classify_media_intent, classify_media_intent_batch
 from bot.media_repository import OfferRecord
 
 
@@ -240,6 +240,77 @@ class MediaIntentTests(unittest.TestCase):
         for text in ("show me your ass", "I want nudes", "send nudes"):
             with self.subTest(text=text):
                 self.assertTrue(classify_media_intent(text).requested)
+
+    def test_subjectless_visual_desire_is_a_direct_request(self):
+        cases = {
+            "wanna see your ass": ("ass", False),
+            "Wanna see your booty?": ("ass", False),
+            "want to see your pussy": ("pussy", False),
+            "wanna see your ass right now": ("ass", True),
+            "wanna see your ass babe": ("ass", False),
+            "wanna see your pussy so bad babe": ("pussy", False),
+            "wanna see your ass again": ("ass", False),
+            "wanna see your ass rn": ("ass", True),
+            "wanna see your pussy video": ("pussy", False),
+        }
+        for text, (body_focus, requires_current) in cases.items():
+            with self.subTest(text=text):
+                intent = classify_media_intent(text)
+                self.assertTrue(intent.requested)
+                self.assertIn(body_focus, intent.tags["body_focus"])
+                self.assertEqual(intent.requires_current, requires_current)
+
+    def test_subjectless_visual_desire_accepts_suffix_modifiers_in_any_order(self):
+        cases = {
+            "wanna see your ass babe right now": ("ass", None, True),
+            "wanna see your ass right now babe": ("ass", None, True),
+            "wanna see your booty baby rn again": ("ass", None, True),
+            "wanna see your pussy again so bad mia": ("pussy", None, False),
+            "wanna see your pussy so bad again babe": ("pussy", None, False),
+            "want to see your pussy video babe again rn": (
+                "pussy",
+                "video",
+                True,
+            ),
+        }
+        for text, (body_focus, requested_type, requires_current) in cases.items():
+            with self.subTest(text=text):
+                intent = classify_media_intent(text)
+                self.assertTrue(intent.requested)
+                self.assertIn(body_focus, intent.tags["body_focus"])
+                self.assertEqual(intent.requested_type, requested_type)
+                self.assertEqual(intent.requires_current, requires_current)
+
+    def test_subjectless_visual_desire_does_not_promote_other_targets(self):
+        for text in (
+            "wanna see my ass",
+            "do you wanna see my ass?",
+            "Tyler wants to see your ass",
+            "I bet you wanna see her ass",
+            "wanna see your dog",
+            "wanna see your reaction",
+            "wanna see your ass get fired",
+            "wanna see you tomorrow",
+            "don't wanna see your ass",
+            "wanna see your ass get fired babe right now",
+            "wanna see your ass tomorrow again baby",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(classify_media_intent(text).requested)
+
+        quoted = classify_media_intent('"wanna see your ass"')
+        self.assertFalse(quoted.requested)
+        self.assertTrue(quoted.blocked_request)
+
+        markdown_quoted = classify_media_intent("> wanna see your ass")
+        self.assertFalse(markdown_quoted.requested)
+        self.assertTrue(markdown_quoted.blocked_request)
+
+        cancelled = classify_media_intent_batch(
+            ["wanna see your ass", "never mind"]
+        )
+        self.assertFalse(cancelled.requested)
+        self.assertEqual(cancelled.decline_kind, "soft")
 
     def test_polite_photo_requests_are_direct_media_requests(self):
         for text in (

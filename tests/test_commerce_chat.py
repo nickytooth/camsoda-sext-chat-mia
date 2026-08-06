@@ -689,6 +689,73 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cross that line", response.messages[0])
         self.assertIn("here's a photo", response.messages[0])
 
+    async def test_direct_current_offer_preserves_one_natural_question_or_statement(self):
+        natural_openers = (
+            "ohhh... you really wanna cross that line? 😈",
+            "wow... you really don't waste time 😈",
+            "who taught you to ask like that?",
+            "you don't play around, do you?",
+            "jesus... you went right for it",
+            "straight for my pussy, huh?",
+            "you are making me reckless tonight",
+            "hold on... who taught you to ask like that?",
+            "you sure know how to ask for trouble",
+        )
+        for generated in natural_openers:
+            with self.subTest(generated=generated):
+                self.events.clear()
+                with ExitStack() as stack:
+                    for turn_patch in self._patch_turn_dependencies(
+                        generated=generated
+                    ):
+                        stack.enter_context(turn_patch)
+                    response = await self.engine._process_sexting(
+                        23, "wanna see your ass"
+                    )
+
+                self.assertEqual(response.commerce_action, "offer_current")
+                self.assertEqual(len(response.messages), 1)
+                self.assertEqual(response.messages[0], generated)
+                self.assertLessEqual(response.messages[0].count("?"), 1)
+
+    async def test_direct_current_offer_replaces_confirmation_or_non_reactive_copy(self):
+        invalid_openers = (
+            "are you sure? do you want me to send this?",
+            "want me to show it to you?",
+            "ohhh... are you sure you want this?",
+            "wow... do you really want it?",
+            "ohhh... wanna see it?",
+            "you sure?",
+            "you want to see it?",
+            "want a look?",
+            "give me a sec and i will show it",
+            "one sec... i will send it",
+            "i will send it in a minute",
+            "okay... if you're sure, i'll send it",
+            "fuck yes babe look how ready i am for you 😈",
+        )
+        for generated in invalid_openers:
+            with self.subTest(generated=generated):
+                self.events.clear()
+                with ExitStack() as stack:
+                    for turn_patch in self._patch_turn_dependencies(
+                        generated=generated
+                    ):
+                        stack.enter_context(turn_patch)
+                    response = await self.engine._process_sexting(
+                        23, "wanna see your ass"
+                    )
+
+                self.assertEqual(response.commerce_action, "offer_current")
+                self.assertIsNotNone(response.media_offer)
+                self.assertEqual(len(response.messages), 1)
+                self.assertNotEqual(response.messages[0], generated)
+                self.assertLessEqual(response.messages[0].count("?"), 1)
+                self.assertNotRegex(
+                    response.messages[0].lower(),
+                    r"(?:are you sure|want me to|should i)",
+                )
+
     async def test_direct_saved_offer_is_one_bubble_with_card(self):
         saved_offer = offer_payload(43)
         saved_offer.update(
@@ -732,6 +799,72 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("special moment", visible.lower())
         self.assertNotIn("Tyler", visible)
         self.assertNotIn("can't take", visible)
+
+    async def test_direct_saved_offer_replaces_body_description_with_bold_reaction(self):
+        saved_offer = offer_payload(43)
+        saved_offer.update(
+            content_id="mia_saved_bedroom_001",
+            description="a private nude photo from her bed",
+        )
+
+        async def plan_saved(user_id, text, *, batch_number, heat, period):
+            return {
+                "action": "offer_saved",
+                "brief": "offer the exact saved photo without a current excuse",
+                "current_context": "",
+                "offered_item_description": "a private nude photo from my bed",
+                "offer": saved_offer,
+            }
+
+        async def finalize_saved(offer_id):
+            return saved_offer
+
+        self.service.plan_commerce_turn = plan_saved
+        self.service.mark_offer_delivered = finalize_saved
+        generated = "fuck yes babe look how ready i am for you 😈"
+        with ExitStack() as stack:
+            for turn_patch in self._patch_turn_dependencies(generated=generated):
+                stack.enter_context(turn_patch)
+            response = await self.engine._process_sexting(
+                23, "show me your pussy babe"
+            )
+
+        self.assertEqual(response.commerce_action, "offer_saved")
+        self.assertIsNotNone(response.media_offer)
+        self.assertEqual(len(response.messages), 1)
+        self.assertNotEqual(response.messages[0], generated)
+        self.assertIn("no hesitation", response.messages[0].lower())
+        self.assertLessEqual(response.messages[0].count("?"), 1)
+
+    async def test_permission_reask_acceptance_never_asks_for_confirmation_again(self):
+        accepted_offer = offer_payload(45)
+        accepted_offer["trigger"] = "permission_reask"
+
+        async def plan_accepted(user_id, text, *, batch_number, heat, period):
+            return {
+                "action": "offer_saved",
+                "brief": "he already accepted the permission check",
+                "offered_item_description": "a private photo from my bed",
+                "offer": accepted_offer,
+            }
+
+        async def finalize_accepted(offer_id):
+            return accepted_offer
+
+        self.service.plan_commerce_turn = plan_accepted
+        self.service.mark_offer_delivered = finalize_accepted
+        with ExitStack() as stack:
+            for turn_patch in self._patch_turn_dependencies(
+                generated="ohhh... are you sure you want this?"
+            ):
+                stack.enter_context(turn_patch)
+            response = await self.engine._process_sexting(23, "yes babe")
+
+        self.assertEqual(response.commerce_action, "offer_saved")
+        self.assertIsNotNone(response.media_offer)
+        self.assertEqual(len(response.messages), 1)
+        self.assertEqual(response.messages[0].count("?"), 0)
+        self.assertNotRegex(response.messages[0].lower(), r"(?:are you sure|confirm)")
 
     async def test_proactive_saved_offer_is_also_one_bubble_with_card(self):
         saved_offer = offer_payload(44)
@@ -833,6 +966,7 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
         live_capture_blocker="",
         live_capture_blocker_kind="",
         current_locations=(),
+        trigger="direct",
     ):
         fallback_offer = offer_payload(45)
         fallback_offer.update(
@@ -841,6 +975,7 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
             price_tokens=10 if media_type == "video" else 5,
             duration_seconds=15 if media_type == "video" else None,
             description=description,
+            trigger=trigger,
         )
 
         async def plan_fallback(user_id, text, *, batch_number, heat, period):
@@ -903,6 +1038,74 @@ class CommerceTurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 for phrase in ("angle", "shot", "not quite", "asked for")
             ),
             response.messages[1],
+        )
+
+    async def test_direct_fallback_limits_questions_across_both_bubbles(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="this is not quite the ass shot he asked for",
+            generated=(
+                "you really wanna go there?\n"
+                "not quite the ass shot you asked for... want a look?"
+            ),
+            requested_detail="ass",
+        )
+
+        self.assertEqual(response.commerce_action, "offer_fallback")
+        self.assertEqual(len(response.messages), 2)
+        visible = "\n".join(response.messages)
+        self.assertLessEqual(visible.count("?"), 1, visible)
+        self.assertNotIn("want a look", visible.lower())
+
+    async def test_direct_fallback_drops_confirmation_and_wait_language(self):
+        generated_variants = (
+            (
+                "wow... straight to that huh\n"
+                "not quite the ass shot you asked for... want a look?"
+            ),
+            (
+                "wait for me to send it later\n"
+                "not quite the ass shot you asked for... but this one is trouble"
+            ),
+            (
+                "wow... straight to that huh\n"
+                "not quite the ass shot you asked for... wait for me to send it later"
+            ),
+        )
+        for generated in generated_variants:
+            with self.subTest(generated=generated):
+                response = await self._run_natural_fallback_copy(
+                    current_context="this is not quite the ass shot he asked for",
+                    generated=generated,
+                    requested_detail="ass",
+                )
+
+                self.assertEqual(response.commerce_action, "offer_fallback")
+                self.assertEqual(len(response.messages), 2)
+                visible = "\n".join(response.messages).lower()
+                self.assertNotRegex(
+                    visible,
+                    r"(?:you sure|want (?:to see it|a look)|wait for|hold on|"
+                    r"send it later)",
+                )
+
+    async def test_permission_reask_fallback_contains_no_questions_or_new_gate(self):
+        response = await self._run_natural_fallback_copy(
+            current_context="this is not quite the ass shot he asked for",
+            generated=(
+                "you sure?\n"
+                "not quite the ass shot you asked for... you want to see it?"
+            ),
+            requested_detail="ass",
+            trigger="permission_reask",
+        )
+
+        self.assertEqual(response.commerce_action, "offer_fallback")
+        self.assertEqual(len(response.messages), 2)
+        visible = "\n".join(response.messages)
+        self.assertEqual(visible.count("?"), 0, visible)
+        self.assertNotRegex(
+            visible.lower(),
+            r"(?:you sure|want (?:to see it|a look)|are you sure|confirm)",
         )
 
     async def test_semantic_fallback_replaces_model_inventory_voice(self):
