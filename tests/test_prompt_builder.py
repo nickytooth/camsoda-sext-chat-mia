@@ -258,7 +258,14 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn('"action": "offer_saved"', system)
         self.assertIn("exactly ONE short text bubble", system)
-        self.assertIn("something you kept for a special moment", system)
+        self.assertNotIn(
+            "as something you kept for a special moment",
+            system.lower(),
+        )
+        self.assertTrue(
+            "avoid stock phrases" in system.lower()
+            or "do not force a special" in system.lower()
+        )
         self.assertIn("a private photo I took from my bed", system)
         self.assertNotIn("a private photo she took from her bed", system)
         self.assertNotIn("Tyler is nearby", system)
@@ -364,6 +371,11 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
                 "brief": "legacy combined copy must not be used",
                 "current_context": "customers are around at the bar",
                 "offered_item_description": "a synthetic test clip from her bathroom",
+                "fallback_kind": "live_blocked",
+                "requested_detail": "ass",
+                "requested_media_type": "video",
+                "live_capture_blocker": "customers are around at the bar",
+                "live_capture_blocker_kind": "work_crowd",
                 "offer": {"trigger": "direct"},
                 "item_locations": ("bathroom",),
                 "current_locations": ("bar", "stockroom"),
@@ -380,10 +392,18 @@ class PromptBuilderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("legacy combined copy must not be used", system)
         self.assertNotIn("item_locations", system)
         self.assertNotIn("current_locations", system)
-        self.assertIn("never describes the file's origin", system)
+        self.assertIn('"fallback_kind": "live_blocked"', system)
+        self.assertIn('"requested_detail": "ass"', system)
+        self.assertIn('"requested_media_type": "video"', system)
+        self.assertIn(
+            '"live_capture_blocker": "customers are around at the bar"',
+            system,
+        )
+        self.assertIn('"live_capture_blocker_kind": "work_crowd"', system)
+        self.assertRegex(system, r"never describe(?:s)? the file's origin")
         self.assertIn("exactly TWO short text bubbles", system)
         self.assertIn("Bubble 1 reacts with genuine surprise", system)
-        self.assertIn("Bubble 2 states the precise mismatch reason", system)
+        self.assertIn("Bubble 2 acknowledges only", system)
         self.assertIn("do not wait for another answer", system)
 
     async def test_storage_reference_in_curated_copy_is_dropped(self):

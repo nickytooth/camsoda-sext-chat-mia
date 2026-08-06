@@ -862,6 +862,31 @@ class PlannedItem:
     fallback_reason: str | None
     request_type: str
     trigger: str
+    # Presentation state stays structured until the final copy boundary.  The
+    # planner decides facts; it must not write a sentence that is shown to the
+    # user as if Mia were describing an inventory search.
+    fallback_kind: str | None = None
+    requested_detail: str | None = None
+    requested_media_type: str | None = None
+    live_capture_blocker: str | None = None
+    live_capture_blocker_kind: str | None = None
+
+
+def _live_capture_blocker_kind(blocker: str | None) -> str | None:
+    """Canonicalise the controlled schedule blocker for copy validation."""
+
+    value = (blocker or "").lower()
+    if not value:
+        return None
+    if "tyler" in value:
+        return "tyler"
+    if "customer" in value or "coworker" in value:
+        return "work_crowd"
+    if "shopper" in value or "store staff" in value:
+        return "shopping_crowd"
+    if "gym" in value:
+        return "gym_crowd"
+    return "social_crowd"
 
 
 class CatalogPlanner:
@@ -1044,47 +1069,44 @@ class CatalogPlanner:
             action = "offer_current"
         else:
             action = "offer_saved"
-        if not fallback:
-            reason = None
-        else:
-            reasons: list[str] = []
-            if intent.requires_current and not current_match:
-                blocker = get_media_live_capture_blocker(period)
-                if blocker:
-                    reasons.append(
-                        f"{blocker}, so she cannot capture the requested fresh version right now"
-                    )
-                else:
-                    reasons.append(
-                        "she does not have a fresh version of that request available right now"
-                    )
-            if used_alternative_type:
-                if not requested_mismatch:
-                    reasons.append(
-                        f"she does not have that as a {intent.requested_type}, but she "
-                        f"does have exactly that as a {selected.media_type}"
-                    )
-                else:
-                    reasons.append(
-                        f"she does not have a matching {intent.requested_type}; this "
-                        f"{selected.media_type} is the closest available type alternative"
-                    )
-            if requested_mismatch:
-                missing: list[str] = []
-                for group, wanted in intent.tags.items():
-                    available = set(selected.tags.get(group, ()))
-                    if not available.intersection(wanted):
-                        missing.extend(value.replace("_", " ") for value in wanted)
-                if intent.explicitness and EXPLICITNESS_LEVELS.index(
-                    selected.explicitness
-                ) < EXPLICITNESS_LEVELS.index(intent.explicitness):
-                    missing.append(intent.explicitness)
-                requested_detail = ", ".join(dict.fromkeys(missing)) or "requested"
-                reasons.append(
-                    f"she does not have the exact {requested_detail} variation; this is "
-                    "the closest available match"
+        missing: list[str] = []
+        if requested_mismatch:
+            for group, wanted in intent.tags.items():
+                available = set(selected.tags.get(group, ()))
+                if not available.intersection(wanted):
+                    missing.extend(value.replace("_", " ") for value in wanted)
+            if intent.explicitness and EXPLICITNESS_LEVELS.index(
+                selected.explicitness
+            ) < EXPLICITNESS_LEVELS.index(intent.explicitness):
+                missing.append(intent.explicitness)
+        requested_detail = ", ".join(dict.fromkeys(missing)) or None
+
+        # Keep one primary, human-relevant reason.  Multiple planner axes may
+        # miss at once, but making Mia recite all of them sounds like a search
+        # report.  The selected card already communicates its actual type.
+        fallback_kind = None
+        live_capture_blocker = None
+        reason = None
+        if intent.requires_current and not current_match:
+            live_capture_blocker = get_media_live_capture_blocker(period)
+            if live_capture_blocker:
+                fallback_kind = "live_blocked"
+                reason = (
+                    f"{live_capture_blocker}, so she cannot take a fresh one right now"
                 )
-            reason = "; ".join(reasons)
+            else:
+                fallback_kind = "live_unavailable"
+                reason = "she does not have a fresh one in that exact angle right now"
+        elif used_alternative_type:
+            fallback_kind = "type_swap"
+            reason = (
+                f"she does not have that as a {intent.requested_type}, but she does "
+                f"have it as a {selected.media_type}"
+            )
+        elif requested_mismatch:
+            fallback_kind = "semantic_near_match"
+            detail = requested_detail or "exact"
+            reason = f"this is not quite the {detail} shot he asked for"
         return PlannedItem(
             item=selected,
             action=action,
@@ -1092,6 +1114,13 @@ class CatalogPlanner:
             fallback_reason=reason,
             request_type=request_type,
             trigger=trigger,
+            fallback_kind=fallback_kind,
+            requested_detail=requested_detail,
+            requested_media_type=intent.requested_type,
+            live_capture_blocker=live_capture_blocker,
+            live_capture_blocker_kind=_live_capture_blocker_kind(
+                live_capture_blocker
+            ),
         )
 
 

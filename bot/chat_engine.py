@@ -58,7 +58,7 @@ from bot.output_guard import (
     validate_user_suggestion,
 )
 from bot.media_planner import classify_media_intent_batch
-from bot.media_copy import spoken_fallback_context, spoken_item_description
+from bot.media_copy import spoken_fallback_context
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +203,152 @@ _UNSAFE_MEDIA_METADATA_RE = re.compile(
     r"(?:premium|previews|posters)[\\/]|(?:full|preview|poster)_key\b|"
     r"x-amz-(?:algorithm|credential|date|expires|signedheaders|signature)\b|"
     r"cloudflare\b|bucket\b)",
+    re.IGNORECASE,
+)
+_MEDIA_COPY_JARGON_RE = re.compile(
+    r"\b(?:exact\s+[a-z][a-z _-]{0,40}\s+variation|"
+    r"closest\s+available(?:\s+(?:match|alternative|option))?|"
+    r"available\s+type\s+alternative|selected\s+(?:alternative|item|media|file)|"
+    r"backend[- ]selected|semantic\s+(?:match|mismatch)|media\s+inventory|"
+    r"catalog\s+(?:item|match)|content\s+item|inventory|search\s+result|"
+    r"(?:top|best|first)\s+(?:result|match|option))\b",
+    re.IGNORECASE,
+)
+_MEDIA_CATALOG_LABEL_RE = re.compile(
+    r"\b(?:private|nude|explicit|suggestive|teasing|playful|intimate|"
+    r"dominant|submissive|risky|mirror|closeup|full[- ]body|pov|tripod)\b",
+    re.IGNORECASE,
+)
+_STACKED_MEDIA_LABEL_RE = re.compile(
+    r"\b(?:(?:private|nude|explicit|suggestive|teasing|playful|intimate|"
+    r"dominant|submissive|risky)\s+){2,}"
+    r"(?:photo|pic|picture|shot|selfie|video|clip)\b",
+    re.IGNORECASE,
+)
+_NATURAL_MISMATCH_RE = re.compile(
+    r"\b(?:not\s+(?:quite|exactly)|don(?:'|\u2019)t\s+have|do\s+not\s+have|"
+    r"isn(?:'|\u2019)t\s+(?:quite|exactly)|different\s+(?:angle|shot)|"
+    r"(?:angle|shot)\s+you\s+(?:asked|wanted)|instead)\b",
+    re.IGNORECASE,
+)
+_LIVE_COPY_RE = re.compile(
+    r"\b(?:fresh|brand[- ]new|right\s+now|rn|take|snap|film|record|"
+    r"Tyler|customers?|coworkers?|people|crowd|girls?|shoppers?|staff|gym|"
+    r"brunch|next\s+room|beside\s+me)\b",
+    re.IGNORECASE,
+)
+_PERSON_CATEGORY_PATTERNS = {
+    "tyler": re.compile(r"\bTyler\b", re.IGNORECASE),
+    "personal_other": re.compile(
+        r"\b(?:friends?|roommates?|boyfriend|someone|guys?|sisters?|brothers?|"
+        r"moms?|mothers?|dads?|fathers?|parents?|cousins?|family|neighbors?|"
+        r"neighbours?)\b",
+        re.IGNORECASE,
+    ),
+    "work_crowd": re.compile(
+        r"\b(?:customers?|coworkers?|colleagues?|boss|manager)\b",
+        re.IGNORECASE,
+    ),
+    "staff": re.compile(r"\bstaff\b", re.IGNORECASE),
+    "girls": re.compile(r"\bgirls?\b", re.IGNORECASE),
+    "shoppers": re.compile(r"\bshoppers?\b", re.IGNORECASE),
+    "generic_crowd": re.compile(
+        r"\b(?:people|crowd(?:ed)?|patrons?|everyone|anyone)\b|"
+        r"too\s+many\s+eyes",
+        re.IGNORECASE,
+    ),
+    "named_other": re.compile(
+        r"\b(?!Tyler\b)[A-Z][A-Za-z'\u2019-]{2,}\s+"
+        r"(?:(?:is|was)\s+)?(?:beside|next\s+to|with|near|around)\s+me\b|"
+        r"\b(?!Tyler\b)[A-Z][A-Za-z'\u2019-]{2,}\s+dared\s+me\b|"
+        r"\b(?!Tyler\b)[A-Z][A-Za-z'\u2019-]{2,}(?:(?:'|\u2019)s|\s+is)?\s+"
+        r"(?:waiting|sitting|standing|sleeping|right\s+here|here)\b"
+    ),
+}
+_SCENE_LOCATION_PATTERNS = {
+    "bar": re.compile(r"\b(?:bar|stockroom|at\s+work)\b", re.IGNORECASE),
+    "gym": re.compile(r"\b(?:gym|locker\s+room)\b", re.IGNORECASE),
+    "club": re.compile(r"\bclub\b", re.IGNORECASE),
+    "outdoors": re.compile(
+        r"\b(?:brunch|shopping|store|shop|outdoors?)\b",
+        re.IGNORECASE,
+    ),
+    "home": re.compile(
+        r"\b(?:home|couch|apartment|next\s+room)\b",
+        re.IGNORECASE,
+    ),
+    "bedroom": re.compile(r"\b(?:bed|bedroom)\b", re.IGNORECASE),
+    "bathroom": re.compile(r"\b(?:bathroom|shower)\b", re.IGNORECASE),
+    "kitchen": re.compile(r"\bkitchen\b", re.IGNORECASE),
+    "car": re.compile(r"\bcar\b", re.IGNORECASE),
+    "hotel": re.compile(r"\bhotel\b", re.IGNORECASE),
+    "beach": re.compile(r"\bbeach\b", re.IGNORECASE),
+    "concert": re.compile(r"\bconcert\b", re.IGNORECASE),
+    "other_place": re.compile(
+        r"\b(?:office|school|classroom|restaurant|cafe|café|studio)\b",
+        re.IGNORECASE,
+    ),
+}
+_CURRENT_CAPTURE_EXCUSE_RE = re.compile(
+    r"\b(?:(?:can(?:'|\u2019)t|cannot|not)\s+(?:take|snap|film|record)|"
+    r"fresh\s+(?:one|photo|pic|video|clip)|too\s+many\s+eyes|at\s+work|"
+    r"next\s+room)\b",
+    re.IGNORECASE,
+)
+_FRESH_CAPTURE_CLAIM_RE = re.compile(
+    r"\bbrand[- ]new\b|"
+    r"\bjust\s+finished\s+(?:taking|snapping|shooting|filming|recording|making|"
+    r"capturing)\b|"
+    r"\b(?:i\s+)?(?:literally\s+)?just\s+"
+    r"(?:took|snapped|shot|filmed|recorded|made|captured)\b|"
+    r"\b(?:i\s+)?(?:took|snapped|shot|filmed|recorded|made|captured)\b"
+    r"(?=[^.!?\n]{0,96}\b(?:just\s+now|right\s+now|rn|moments?\s+ago|"
+    r"a\s+(?:second|minute)\s+ago|"
+    r"(?:a\s+)?few\s+(?:seconds?|minutes?)\s+ago|"
+    r"\d+\s+(?:seconds?|minutes?)\s+ago)\b)|"
+    r"\bfresh(?:ly)?\s+(?:taken|snapped|shot|filmed|recorded|captured)\b|"
+    r"\b(?:this|it|one)(?:(?:'|\u2019)s|\s+is)\s+fresh\b",
+    re.IGNORECASE,
+)
+_NEGATING_TERM_PREFIX_RE = re.compile(
+    r"(?:"
+    r"\b(?:don(?:'|\u2019)t|do\s+not)\s+have\s+"
+    r"(?:(?:that|it|this|one|as|an?|the|any|exact|matching|same|quite|"
+    r"good|kind|sort|of)\s+){0,7}|"
+    r"\b(?:haven(?:'|\u2019)t|have\s+not)\s+(?:got\s+)?"
+    r"(?:(?:that|it|this|one|as|an?|the|any|exact|matching|same|quite|"
+    r"good|kind|sort|of)\s+){0,7}|"
+    r"\b(?:isn(?:'|\u2019)t|is\s+not|aren(?:'|\u2019)t|are\s+not|"
+    r"wasn(?:'|\u2019)t|was\s+not)\s+"
+    r"(?:(?:an?|the|any|exact|matching|same|quite)\s+){0,4}|"
+    r"\b(?:not\s+(?:quite|exactly)|without|missing)\s+"
+    r"(?:[\w'\u2019-]+\s+){0,4}|"
+    r"\bno\s+(?:(?:real|actual|matching|exact|good)\s+){0,2}"
+    r")$",
+    re.IGNORECASE,
+)
+_NEGATING_TERM_SUFFIX_RE = re.compile(
+    r"^\s*(?:isn(?:'|\u2019)t|is\s+not|aren(?:'|\u2019)t|are\s+not|"
+    r"wasn(?:'|\u2019)t|was\s+not)\s+(?:available|here|included|visible|"
+    r"shown|present|in\s+this|one\s+i\s+have|something\s+i\s+have|"
+    r"what\s+this\s+is)\b|"
+    r"^\s*(?:doesn(?:'|\u2019)t\s+exist|is\s+missing|is\s+unavailable)\b",
+    re.IGNORECASE,
+)
+_DETAIL_COPY_ALIASES = {
+    "ass": r"(?:ass|butt|booty)",
+    "boobs": r"(?:boobs?|tits?|breasts?|chest)",
+    "pussy": r"(?:pussy|vagina)",
+    "nude": r"(?:nude|naked)",
+    "full body": r"(?:full[- ]body|head\s+to\s+toe)",
+}
+_GENERIC_CURRENT_LOCATION_RE = re.compile(
+    r"\b(?:i(?:(?:'|\u2019)m|\s+am)|stuck)\s+(?:"
+    r"(?:at|inside|behind)\s+(?:(?:my|the|a)\s+)?"
+    r"[A-Za-z][\w'\u2019.-]*(?:\s+[A-Za-z][\w'\u2019.-]*){0,3}|"
+    r"in\s+(?!(?:(?:the|a)\s+)?(?:mood|love|trouble|control)\b)"
+    r"(?:(?:my|the|a)\s+)?[A-Za-z][\w'\u2019.-]*"
+    r"(?:\s+[A-Za-z][\w'\u2019.-]*){0,3}|backstage)\b",
     re.IGNORECASE,
 )
 
@@ -1878,6 +2024,10 @@ class ChatEngine:
         except BaseException:
             await asyncio.shield(self._cancel_commerce_turn(commerce_turn))
             raise
+        if (not response_text or not response_text.strip()) and commerce_turn.media_offer:
+            # Both providers missed the brief, but the real item and its
+            # structured presentation facts are already trusted and reserved.
+            response_text = self._deterministic_commerce_copy(commerce_turn)
         if not response_text or not response_text.strip():
             # A planned commerce action must never be reported without valid,
             # in-character text. Release it before falling back to an unrelated
@@ -2146,7 +2296,14 @@ class ChatEngine:
                 parts = cls._force_two_offer_bubbles(text)
             return cls._ensure_fallback_context(parts, turn)
 
-        if turn.action in {"offer_current", "offer_saved"}:
+        if turn.action == "offer_saved":
+            packed = cls._repack_to_n(text, 1)
+            visible = (packed[:1] or [text.strip()])[0]
+            if cls._saved_offer_copy_is_safe(visible, turn):
+                return [visible]
+            return [cls._deterministic_saved_offer_copy(turn)]
+
+        if turn.action == "offer_current":
             packed = cls._repack_to_n(text, 1)
             return packed[:1] or [text.strip()]
 
@@ -2166,11 +2323,543 @@ class ChatEngine:
         )
 
     @staticmethod
-    def _naturalize_media_description(description: object) -> str:
-        value = " ".join(str(description or "").split())[:240]
-        if not value or _UNSAFE_MEDIA_METADATA_RE.search(value):
-            return "the closest private one i already have"
-        return spoken_item_description(value)
+    def _fallback_kind(turn: _CommerceTurn) -> str:
+        value = str(_object_value(turn.decision, "fallback_kind", "") or "")
+        if value in {
+            "live_blocked",
+            "live_unavailable",
+            "type_swap",
+            "semantic_near_match",
+        }:
+            return value
+
+        # Compatibility for lightweight adapters and history fixtures created
+        # before the planner began carrying a structured reason code.
+        context = str(
+            _object_value(turn.decision, "current_context", "") or ""
+        ).lower()
+        if re.search(r"\bas\s+a\s+(?:photo|video)\b|type\s+alternative", context):
+            return "type_swap"
+        if re.search(
+            r"\b(?:tyler|customers?|coworkers?|people|crowd|girls?|shoppers?|"
+            r"staff|gym|brunch|next room|beside her)\b",
+            context,
+        ):
+            return "live_blocked"
+        if re.search(r"\b(?:fresh|capture|right now)\b", context):
+            return "live_unavailable"
+        return "semantic_near_match"
+
+    @staticmethod
+    def _casualize_media_copy(value: str) -> str:
+        """Lightly contract trusted prose without changing any factual claim."""
+
+        text = " ".join(value.split()).strip(" ,.;")
+        replacements = (
+            (r"\bI cannot\b", "i can't"),
+            (r"\bI do not\b", "i don't"),
+            (r"\bI have not\b", "i haven't"),
+            (r"\bI am\b", "i'm"),
+            (r"\bTyler is\b", "Tyler's"),
+            (r"\bthe club is\b", "the club's"),
+        )
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        return text
+
+    @staticmethod
+    def _media_type_pattern(media_type: str) -> str:
+        return (
+            r"(?:photo|pic|picture|shot|selfie)"
+            if media_type == "photo"
+            else r"(?:video|clip)"
+        )
+
+    @staticmethod
+    def _term_occurrence_is_negated(
+        clause: str,
+        start: int,
+        end: int,
+    ) -> bool:
+        """Require negation to govern the term, not merely occur nearby."""
+
+        prefix = clause[max(0, start - 96) : start]
+        suffix = clause[end : min(len(clause), end + 48)]
+        if re.search(
+            r"\b(?:"
+            r"(?:not\s+true|not\s+the\s+case|isn(?:'|\u2019)t\s+true)\s+that|"
+            r"never\s+said|can(?:'|\u2019)t\s+say|cannot\s+say|"
+            r"didn(?:'|\u2019)t\s+say|not\s+saying"
+            r")\b[^.!?\n]{0,72}\b(?:don(?:'|\u2019)t|do\s+not|"
+            r"isn(?:'|\u2019)t|is\s+not)\b",
+            prefix,
+            re.IGNORECASE,
+        ):
+            return False
+        return bool(
+            _NEGATING_TERM_PREFIX_RE.search(prefix)
+            or _NEGATING_TERM_SUFFIX_RE.search(suffix)
+        )
+
+    @classmethod
+    def _type_swap_direction_is_grounded(
+        cls,
+        text: str,
+        turn: _CommerceTurn,
+    ) -> bool:
+        selected = str((turn.media_offer or {}).get("media_type", ""))
+        requested = str(
+            _object_value(turn.decision, "requested_media_type", "") or ""
+        )
+        if requested not in {"photo", "video"}:
+            context = str(
+                _object_value(turn.decision, "current_context", "") or ""
+            )
+            match = re.search(
+                r"\b(?:as|matching)\s+(?:a\s+)?(photo|video)\b",
+                context,
+                re.IGNORECASE,
+            )
+            if match:
+                requested = match.group(1).lower()
+        if requested not in {"photo", "video"} and selected in {"photo", "video"}:
+            requested = "video" if selected == "photo" else "photo"
+        if (
+            requested not in {"photo", "video"}
+            or selected not in {"photo", "video"}
+            or requested == selected
+        ):
+            return False
+
+        requested_re = re.compile(
+            rf"\b{cls._media_type_pattern(requested)}\b",
+            re.IGNORECASE,
+        )
+        selected_re = re.compile(
+            rf"\b{cls._media_type_pattern(selected)}\b",
+            re.IGNORECASE,
+        )
+        positive_re = re.compile(
+            r"\b(?:have|got|giving|sending|showing|picked|here(?:'|\u2019)s|"
+            r"is|better|instead)\b",
+            re.IGNORECASE,
+        )
+        clauses = [
+            clause.strip()
+            for clause in re.split(r"\b(?:but|so)\b|[,;.!?\n]+", text, flags=re.I)
+            if clause.strip()
+        ]
+        requested_is_missing = any(
+            cls._term_occurrence_is_negated(
+                clause,
+                match.start(),
+                match.end(),
+            )
+            for clause in clauses
+            for match in requested_re.finditer(clause)
+        )
+        selected_is_offered = any(
+            positive_re.search(clause)
+            and not cls._term_occurrence_is_negated(
+                clause,
+                match.start(),
+                match.end(),
+            )
+            for clause in clauses
+            for match in selected_re.finditer(clause)
+        )
+        return requested_is_missing and selected_is_offered
+
+    @staticmethod
+    def _reason_clause(text: str) -> str:
+        return re.split(
+            r"\bbut\b|\bso\b|\.{2,}|\u2026|[.!?;\n]",
+            text,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip()
+
+    @staticmethod
+    def _person_categories(text: str) -> set[str]:
+        return {
+            category
+            for category, pattern in _PERSON_CATEGORY_PATTERNS.items()
+            if pattern.search(text)
+        }
+
+    @staticmethod
+    def _scene_locations(text: str) -> set[str]:
+        return {
+            location
+            for location, pattern in _SCENE_LOCATION_PATTERNS.items()
+            if pattern.search(text)
+        }
+
+    @staticmethod
+    def _current_scene_locations(text: str) -> set[str]:
+        """Find location words framed as Mia's current scene, not file origin."""
+
+        locations: set[str] = set()
+        for location, pattern in _SCENE_LOCATION_PATTERNS.items():
+            for match in pattern.finditer(text):
+                prefix = text[max(0, match.start() - 72) : match.start()]
+                suffix = text[match.end() : min(len(text), match.end() + 56)]
+                is_file_origin = bool(
+                    re.search(
+                        r"\bfrom\s+(?:my|the|this)\s*$|"
+                        r"\b(?:took|filmed|shot|recorded|made)\s+"
+                        r"(?:this|it|one|the\s+(?:pic|photo|video|clip))\s+"
+                        r"(?:in|at)\s+(?:my|the)?\s*$",
+                        prefix,
+                        re.IGNORECASE,
+                    )
+                )
+                framed_before = bool(re.search(
+                    r"\b(?:i(?:(?:'|\u2019)m|\s+am)|while\s+i(?:(?:'|\u2019)m|"
+                    r"\s+am)|stuck|working|currently|right\s+here)\b|"
+                    r"\b(?:sitting|standing|waiting|hiding|chilling|"
+                    r"getting\s+(?:ready|dressed))\s+"
+                    r"(?:at|in|inside|behind)\s+(?:(?:my|the|a)\s+)?$",
+                    prefix,
+                    re.IGNORECASE,
+                ))
+                framed_after = bool(re.search(
+                    r"^\s*(?:(?:is|(?:'|\u2019)s)\s+)?(?:right\s+now|rn|"
+                    r"now|today|tonight|atm|at\s+the\s+moment|currently|packed|"
+                    r"busy|full\s+of\s+people)\b",
+                    suffix,
+                    re.IGNORECASE,
+                ))
+                if not is_file_origin and (framed_before or framed_after):
+                    locations.add(location)
+        for match in _GENERIC_CURRENT_LOCATION_RE.finditer(text):
+            framed = match.group(0)
+            if not any(
+                pattern.search(framed)
+                for pattern in _SCENE_LOCATION_PATTERNS.values()
+            ):
+                locations.add("other_place")
+        if re.search(
+            r"\b(?:i(?:(?:'|\u2019)m|\s+am)\s+)?(?:at\s+work|working\s+my\s+shift)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            locations.add("bar")
+        return locations
+
+    @staticmethod
+    def _canonical_current_locations(values: object) -> set[str]:
+        aliases = {
+            "stockroom": "bar",
+            "locker_room": "gym",
+            "shower": "bathroom",
+        }
+        if isinstance(values, str):
+            candidates = (values,)
+        else:
+            try:
+                candidates = tuple(values or ())
+            except TypeError:
+                candidates = ()
+        return {
+            aliases.get(str(value), str(value))
+            for value in candidates
+            if str(value)
+        }
+
+    @classmethod
+    def _live_blocker_is_grounded(
+        cls,
+        text: str,
+        blocker: str,
+        blocker_kind: str,
+        turn: _CommerceTurn,
+    ) -> bool:
+        categories = cls._person_categories(text)
+        allowed_by_kind = {
+            "tyler": {"tyler"},
+            "work_crowd": {"work_crowd", "staff", "generic_crowd"},
+            "gym_crowd": {"generic_crowd"},
+            "social_crowd": {"girls", "generic_crowd"},
+            "shopping_crowd": {"shoppers", "staff", "generic_crowd"},
+        }
+        allowed_categories = allowed_by_kind.get(blocker_kind, set())
+        if not categories or not categories.issubset(allowed_categories):
+            return False
+        if not categories.intersection(allowed_categories):
+            return False
+
+        allowed_locations = cls._canonical_current_locations(
+            _object_value(turn.decision, "current_locations", ())
+        )
+        allowed_locations.update(cls._scene_locations(blocker))
+        mentioned_locations = cls._scene_locations(cls._reason_clause(text))
+        mentioned_locations.update(cls._current_scene_locations(text))
+        if mentioned_locations and not mentioned_locations.issubset(allowed_locations):
+            return False
+        return True
+
+    @staticmethod
+    def _requested_detail_is_safely_negated(text: str, detail: str) -> bool:
+        clauses = [
+            clause.strip()
+            for clause in re.split(
+                r"\b(?:but|so|and|although|while|yet|though|however|because)\b|"
+                r"\.{2,}|\u2026|[-\u2014:,;.!?\n]+",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if clause.strip()
+        ]
+        for raw_detail in re.split(r"\s*,\s*", detail):
+            requested = " ".join(raw_detail.split()).strip()
+            if not requested:
+                continue
+            requested_pattern = _DETAIL_COPY_ALIASES.get(
+                requested.lower(),
+                re.escape(requested).replace(r"\ ", r"\s+"),
+            )
+            requested_re = re.compile(
+                rf"\b{requested_pattern}\b",
+                re.IGNORECASE,
+            )
+            for clause in clauses:
+                for match in requested_re.finditer(clause):
+                    if not ChatEngine._term_occurrence_is_negated(
+                        clause,
+                        match.start(),
+                        match.end(),
+                    ):
+                        return False
+        return True
+
+    @classmethod
+    def _fallback_teaser_is_safe(cls, text: str) -> bool:
+        return not (
+            cls._person_categories(text)
+            or cls._scene_locations(text)
+            or cls._current_scene_locations(text)
+            or _CURRENT_CAPTURE_EXCUSE_RE.search(text)
+        )
+
+    @classmethod
+    def _saved_offer_copy_is_safe(
+        cls,
+        text: str,
+        turn: _CommerceTurn | None = None,
+    ) -> bool:
+        if (
+            cls._person_categories(text)
+            or _CURRENT_CAPTURE_EXCUSE_RE.search(text)
+            or _FRESH_CAPTURE_CLAIM_RE.search(text)
+            or _MEDIA_COPY_JARGON_RE.search(text)
+            or re.search(r"\bspecial\s+moment\b", text, re.I)
+        ):
+            return False
+        description = " ".join(
+            str(
+                _object_value(
+                    turn.decision if turn else None,
+                    "offered_item_description",
+                    "",
+                )
+                or ""
+            ).split()
+        ).strip(" ,.;")
+        description_variants = {
+            description.lower(),
+            re.sub(r"^(?:a|an|the)\s+", "", description.lower()),
+        }
+        if any(
+            len(variant.split()) >= 4 and variant in text.lower()
+            for variant in description_variants
+        ):
+            return False
+        return not cls._current_scene_locations(text)
+
+    @staticmethod
+    def _fallback_echoes_catalog_label(
+        text: str,
+        turn: _CommerceTurn,
+    ) -> bool:
+        """Reject product-label phrasing while preserving casual words like clip."""
+
+        description = " ".join(
+            str(
+                _object_value(
+                    turn.decision,
+                    "offered_item_description",
+                    "",
+                )
+                or ""
+            ).split()
+        ).strip(" ,.;").lower()
+        if not description or not _MEDIA_CATALOG_LABEL_RE.search(description):
+            return False
+        variants = {
+            description,
+            re.sub(r"^(?:a|an|the)\s+", "", description),
+        }
+        visible = " ".join(str(text or "").split()).lower()
+        if _STACKED_MEDIA_LABEL_RE.search(visible):
+            return True
+        for variant in tuple(variants):
+            variants.add(re.sub(r"\bfrom\s+my\s+", "from the ", variant))
+            variants.add(re.sub(r"\bfrom\s+the\s+", "from my ", variant))
+        return any(
+            len(variant.split()) >= 4 and variant in visible
+            for variant in variants
+        )
+
+    @classmethod
+    def _fallback_copy_is_natural(
+        cls,
+        text: str,
+        turn: _CommerceTurn,
+    ) -> bool:
+        """Validate meaning while leaving the model free to sound like Mia."""
+
+        value = " ".join(str(text or "").split())
+        if (
+            not value
+            or _MEDIA_COPY_JARGON_RE.search(value)
+            or _FRESH_CAPTURE_CLAIM_RE.search(value)
+            or cls._fallback_echoes_catalog_label(value, turn)
+        ):
+            return False
+
+        kind = cls._fallback_kind(turn)
+        blocker = str(
+            _object_value(turn.decision, "live_capture_blocker", "") or ""
+        )
+        if not blocker and kind == "live_blocked":
+            blocker = str(
+                _object_value(turn.decision, "current_context", "") or ""
+            )
+        blocker_kind = str(
+            _object_value(
+                turn.decision,
+                "live_capture_blocker_kind",
+                "",
+            )
+            or ""
+        )
+        if blocker_kind not in {
+            "tyler",
+            "work_crowd",
+            "gym_crowd",
+            "social_crowd",
+            "shopping_crowd",
+        }:
+            lowered_blocker = blocker.lower()
+            if "tyler" in lowered_blocker:
+                blocker_kind = "tyler"
+            elif "customer" in lowered_blocker or "coworker" in lowered_blocker:
+                blocker_kind = "work_crowd"
+            elif "shopper" in lowered_blocker or "store staff" in lowered_blocker:
+                blocker_kind = "shopping_crowd"
+            elif "gym" in lowered_blocker:
+                blocker_kind = "gym_crowd"
+            elif blocker:
+                blocker_kind = "social_crowd"
+        if kind != "live_blocked" and (
+            cls._person_categories(value)
+            or cls._current_scene_locations(value)
+        ):
+            return False
+        if kind == "type_swap":
+            return cls._type_swap_direction_is_grounded(value, turn)
+        if kind == "live_blocked":
+            return bool(
+                _LIVE_COPY_RE.search(value)
+                and blocker
+                and cls._live_blocker_is_grounded(
+                    value,
+                    blocker,
+                    blocker_kind,
+                    turn,
+                )
+            )
+        if kind == "live_unavailable":
+            return bool(_LIVE_COPY_RE.search(value))
+        detail = str(
+            _object_value(turn.decision, "requested_detail", "") or ""
+        )
+        return bool(
+            _NATURAL_MISMATCH_RE.search(value)
+            and cls._requested_detail_is_safely_negated(value, detail)
+        )
+
+    @classmethod
+    def _deterministic_fallback_copy(cls, turn: _CommerceTurn) -> str:
+        """Last-resort truthful copy after both model attempts miss the brief."""
+
+        kind = cls._fallback_kind(turn)
+        selected_type = str((turn.media_offer or {}).get("media_type", ""))
+        requested_type = str(
+            _object_value(turn.decision, "requested_media_type", "") or ""
+        )
+        detail = " ".join(
+            str(_object_value(turn.decision, "requested_detail", "") or "").split()
+        )[:80].strip(" ,.;")
+        if kind == "type_swap":
+            offered = selected_type if selected_type in {"photo", "video"} else "video"
+            wanted = requested_type
+            if wanted not in {"photo", "video"}:
+                context = str(
+                    _object_value(turn.decision, "current_context", "") or ""
+                )
+                match = re.search(
+                    r"\b(?:as|matching)\s+(?:a\s+)?(photo|video)\b",
+                    context,
+                    re.IGNORECASE,
+                )
+                wanted = match.group(1).lower() if match else ""
+            if wanted not in {"photo", "video"} or wanted == offered:
+                wanted = "video" if offered == "photo" else "photo"
+            return (
+                f"i don't have that as a {wanted}... but the {offered} is honestly "
+                "better anyway 😈"
+            )
+
+        if kind == "semantic_near_match":
+            if detail:
+                return (
+                    f"not quite the {detail} shot you asked for... but i think you'll "
+                    "forgive me when you open this"
+                )
+            return (
+                "not quite the angle you asked for... but this one is definitely not "
+                "a downgrade"
+            )
+
+        if kind == "live_blocked":
+            blocker = _object_value(turn.decision, "live_capture_blocker", "")
+            if not blocker:
+                context = str(
+                    _object_value(turn.decision, "current_context", "") or ""
+                )
+                blocker = re.split(
+                    r",?\s+so\s+(?:I|i|she)\b",
+                    context,
+                    maxsplit=1,
+                    flags=re.IGNORECASE,
+                )[0]
+            natural_blocker = cls._casualize_media_copy(
+                cls._naturalize_fallback_context(blocker)
+            )
+            if _MEDIA_COPY_JARGON_RE.search(natural_blocker):
+                natural_blocker = "there are too many eyes around me"
+            saved_noun = "clip" if selected_type == "video" else "pic"
+            return (
+                f"{natural_blocker}, so i can't take a fresh one rn... but i have "
+                f"a saved {saved_noun} that's going to make waiting worse 😈"
+            )
+
+        return (
+            "i don't have a fresh one in that exact angle rn... but this saved "
+            f"{selected_type or 'one'} should make up for it"
+        )
 
     @classmethod
     def _ensure_fallback_context(
@@ -2178,23 +2867,54 @@ class ChatEngine:
         parts: list[str],
         turn: _CommerceTurn,
     ) -> list[str]:
-        """Guarantee bubble two explains the current mismatch before the card."""
+        """Keep natural model copy; compose only when its meaning is unusable."""
 
-        current_context = str(
-            _object_value(turn.decision, "current_context", "") or ""
+        first = parts[0] if parts else ""
+        if not first or not cls._fallback_teaser_is_safe(first):
+            first = cls._deterministic_offer_lead(turn)
+        second = parts[1] if len(parts) > 1 else ""
+        if cls._fallback_copy_is_natural(second, turn):
+            return [first, second]
+        return [first, cls._deterministic_fallback_copy(turn)]
+
+    @staticmethod
+    def _deterministic_offer_lead(turn: _CommerceTurn) -> str:
+        offer_id = int((turn.media_offer or {}).get("offer_id", 0) or 0)
+        leads = (
+            "ohhh... you really wanna go there? 😈",
+            "wow, straight to it huh? you're getting brave 😈",
+            "god... you really know what to ask for",
         )
-        reason = cls._naturalize_fallback_context(current_context)
-        description = cls._naturalize_media_description(
-            _object_value(
-                turn.decision,
-                "offered_item_description",
-                "",
+        return leads[offer_id % len(leads)]
+
+    @staticmethod
+    def _deterministic_saved_offer_copy(turn: _CommerceTurn) -> str:
+        offer_id = int((turn.media_offer or {}).get("offer_id", 0) or 0)
+        saved = (
+            "ohhh... you picked the right thing to ask for 😈 open this",
+            "fine... but don't blame me when you can't stop looking at this",
+            "i've been waiting for an excuse to show you this 😈",
+        )
+        return saved[offer_id % len(saved)]
+
+    @classmethod
+    def _deterministic_commerce_copy(cls, turn: _CommerceTurn) -> str:
+        """Safe final copy when both providers fail an authorised offer."""
+
+        offer_id = int((turn.media_offer or {}).get("offer_id", 0) or 0)
+        if turn.action == "offer_fallback":
+            return (
+                f"{cls._deterministic_offer_lead(turn)}\n"
+                f"{cls._deterministic_fallback_copy(turn)}"
             )
+        if turn.action == "offer_saved":
+            return cls._deterministic_saved_offer_copy(turn)
+        current = (
+            "ohhh... you really wanna go there? 😈 look what you talked me into",
+            "wow, okay... you're getting exactly what you asked for",
+            "god... open this before i change my mind 😈",
         )
-        return [
-            parts[0],
-            f"{reason}... but i picked {description} for you instead",
-        ]
+        return current[offer_id % len(current)]
 
     @classmethod
     def _force_two_offer_bubbles(cls, text: str) -> list[str]:
