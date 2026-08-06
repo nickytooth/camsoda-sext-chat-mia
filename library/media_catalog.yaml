@@ -1,7 +1,71 @@
-# Public-repository fallback catalog.
-#
-# Real catalog metadata belongs in the ignored
-# .private-media/media_catalog.yaml file (or MEDIA_CATALOG_FILE). Paid assets
-# remain in private R2; never commit object fingerprints or explicit metadata.
 version: 1
-items: []
+items:
+- id: mia_bedroom_001
+  type: photo
+  status: active
+  explicitness: nude
+  min_heat: high
+  presentation:
+    mode: past_only
+    periods: []
+    current_description: null
+    past_description: a private nude selfie from her bed
+  tags:
+    location:
+    - bedroom
+    body_focus:
+    - boobs
+    - pussy
+    - full_body
+    activity:
+    - selfie
+    - posing
+    outfit:
+    - nude
+    vibe:
+    - teasing
+    - intimate
+    capture:
+    - selfie
+    - full_body
+  full_key: premium/mia_bedroom_001/7706b5c10fb9f57e115b604b9ed9c38cef9efac3e2d9709b477b8e4e631c2ddd.jpg
+  preview_key: previews/mia_bedroom_001/72649c5bc6b5c23fd44fedf9b442bc5f531de4f9ad298a3f3e031ad99c150d75.webp
+  poster_key: null
+  mime_type: image/jpeg
+  aspect_ratio: 0.562637
+  duration_seconds: null
+  sha256: 7706b5c10fb9f57e115b604b9ed9c38cef9efac3e2d9709b477b8e4e631c2ddd
+- id: mia_bathroom_clip_001
+  type: video
+  status: active
+  explicitness: nude
+  min_heat: high
+  presentation:
+    mode: past_only
+    periods: []
+    current_description: null
+    past_description: a private nude clip from her bathroom
+  tags:
+    location:
+    - bathroom
+    body_focus:
+    - boobs
+    - pussy
+    - full_body
+    activity:
+    - posing
+    outfit:
+    - nude
+    vibe:
+    - teasing
+    - intimate
+    capture:
+    - tripod
+    - full_body
+  full_key: premium/mia_bathroom_clip_001/b3952672b8042800451d395ca4f55ab521a63f90a1237f106116699a0291c69d.mp4
+  preview_key: previews/mia_bathroom_clip_001/2d2c29ff754d1690e7bdab69357533fda573eb3f1f2068072eb700f775a7d1b1.webp
+  poster_key: posters/mia_bathroom_clip_001/f3b34eb5996f69a0257b90b04ed11cc38e6e418fb0657c2dfcf4125519657413.webp
+  mime_type: video/mp4
+  aspect_ratio: 0.5625
+  duration_seconds: 15.092993
+  sha256: b3952672b8042800451d395ca4f55ab521a63f90a1237f106116699a0291c69d

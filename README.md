@@ -157,7 +157,7 @@ Edit `.env`:
 | `DEFAULT_USER_ID` | | Single-user demo id (default `1`) |
 | `OPENWEATHER_API_KEY` | optional | Enables Miami weather in her context; omitted → weather is off |
 | `SEXTING_DEBOUNCE_SECONDS` | optional | Debounce before she replies, seconds (default `5`) |
-| `MEDIA_CATALOG_FILE` | | Private runtime catalog (auto-detects `.private-media/media_catalog.yaml`, otherwise uses the empty public fallback) |
+| `MEDIA_CATALOG_FILE` | | Runtime catalog (default `library/media_catalog.yaml`) |
 | `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | commerce | Cloudflare R2 S3 credentials; when absent, normal chat stays online and media offers/unlocks are disabled |
 | `R2_BUCKET_NAME` | commerce | Private bucket containing the catalog's full, preview and poster keys |
 | `R2_UPLOAD_ACCESS_KEY_ID` / `R2_UPLOAD_SECRET_ACCESS_KEY` | offline tooling | Separate bucket-scoped read/write credentials used only by the media publish command |
@@ -175,12 +175,12 @@ Frontend (optional, for non-local backends) — create `frontend/.env.local`:
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-### 4. Provision the private R2 catalog
+### 4. Provision the private R2 media
 
-The checked-in runtime catalog is intentionally empty because this repository
-is public. Never use anything under `frontend/public` as paid media: those files
-are directly reachable without an entitlement. Add entries only for distinct,
-approved assets whose full bytes exist exclusively in the private R2 bucket.
+The demo runtime catalog is tracked at `library/media_catalog.yaml`, while the
+full media bytes remain exclusively in the private R2 bucket. Never use anything
+under `frontend/public` as paid media: those files are directly reachable
+without an entitlement. Add entries only for distinct, approved assets.
 
 Create a **private** Cloudflare R2 bucket (no public/custom domain). Asset
 preparation and upload are automated; do not make previews or edit the runtime
@@ -200,8 +200,9 @@ python scripts\media_pipeline.py publish
 The pipeline requires `ffmpeg` and `ffprobe` on `PATH` for video normalization
 and the paid-vs-public media safety check.
 
-The ignored `.private-media` directory and `.media-build` output are never
-committed. The pipeline applies image orientation, strips EXIF/GPS and video
+The ignored `.private-media` source directory and `.media-build` output are
+never committed. The generated runtime catalog is tracked in `library`. The
+pipeline applies image orientation, strips EXIF/GPS and video
 metadata, normalizes videos to browser-compatible H.264/AAC MP4, generates
 separate strongly downscaled/pixelated/blurred WebP previews and video posters,
 computes every checksum/dimension/duration, and uses immutable content-addressed
@@ -212,11 +213,11 @@ an asset already under `frontend/public` cannot turn it into paid content.
 `publish` uses a separate bucket-scoped read/write token, refuses to overwrite
 different bytes with conditional creates, streams the stored object back to
 verify its real SHA-256, HEAD-verifies the entire resulting catalog, and only
-then installs the ignored `.private-media/media_catalog.yaml` under a
-cross-process lock and baseline-digest check. A failure leaves the previous
-catalog unchanged. The tracked `library/media_catalog.yaml` intentionally stays
-empty because this repository is public; deploy the private catalog separately
-or set `MEDIA_CATALOG_FILE` to another protected path.
+then installs `library/media_catalog.yaml` under a cross-process lock and
+baseline-digest check. A failure leaves the previous catalog unchanged. Commit
+the generated catalog with the application so Git-based deployments such as
+Railway load the same validated inventory. Full media bytes remain private in
+R2 and are still protected by entitlement checks.
 The backend token should be read-only.
 
 Because the unlocked player reads the short-lived signed URL directly, set an

@@ -27,9 +27,16 @@ class MediaCatalogValidationTests(unittest.TestCase):
             path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
             return load_media_catalog(path)
 
-    def test_runtime_catalog_is_empty_public_fallback(self):
+    def test_runtime_catalog_contains_the_demo_inventory(self):
         catalog = load_media_catalog(RUNTIME_CATALOG_PATH)
-        self.assertEqual(catalog.items, ())
+        self.assertEqual(
+            {item.id for item in catalog.active_items()},
+            {"mia_bedroom_001", "mia_bathroom_clip_001"},
+        )
+        self.assertEqual(
+            {item.media_type for item in catalog.active_items()},
+            {"photo", "video"},
+        )
 
     def test_fixture_catalog_is_valid_and_has_bar_photo_and_video(self):
         catalog = load_media_catalog(CATALOG_PATH)
